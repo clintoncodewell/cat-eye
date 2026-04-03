@@ -1,6 +1,12 @@
-# Cat Eye
+# Cat Eye — GitHub Actions & PR Monitor for macOS
 
-The octocat's eye never blinks. A lightweight native macOS menu bar app that watches your GitHub Actions and Pull Requests so you don't have to. No Electron, no web views — just a 225KB Swift binary that sits quietly in your menu bar, glowing green or red.
+> A lightweight, native macOS menu bar app for monitoring GitHub Actions CI/CD status and pull request reviews. Open source, 225KB, zero Electron.
+
+The octocat's eye never blinks.
+
+**There are plenty of GitHub status apps out there.** Most are Electron wrappers that eat 200MB+ of RAM to show you a green checkmark. Cat Eye exists because a status indicator shouldn't cost more than the IDE it sits next to.
+
+This is a **native macOS menu bar app** — a single 225KB Swift binary, ~45MB RSS, zero frameworks beyond AppKit. It does one thing: shows you whether your GitHub Actions are passing and your PRs need attention. No dashboard, no analytics, no features you'll never use. Just a colored icon that turns red when something breaks.
 
 ## Features
 
@@ -36,13 +42,26 @@ The octocat's eye never blinks. A lightweight native macOS menu bar app that wat
 ## Requirements
 
 - macOS 13+ (Ventura or later)
-- Xcode Command Line Tools (`xcode-select --install`)
-- [GitHub CLI](https://cli.github.com/) (`gh`) installed and authenticated
+- [GitHub CLI](https://cli.github.com/) (`gh`) installed and authenticated (`brew install gh && gh auth login`)
 - Apple Silicon or Intel Mac
+- Xcode Command Line Tools only if building from source (`xcode-select --install`)
 
 ## Installation
 
-### Quick start
+### Option 1: Homebrew (recommended)
+
+```bash
+brew tap clintoncodewell/tap
+brew install cat-eye
+```
+
+Then launch with `open $(brew --prefix)/CatEye.app`.
+
+### Option 2: Download binary
+
+Grab `CatEye.zip` from the [latest release](https://github.com/clintoncodewell/cat-eye/releases), unzip, and double-click. On first launch, macOS will block it — right-click → Open → Open to bypass Gatekeeper (required for unsigned apps).
+
+### Option 3: Build from source
 
 ```bash
 # Prerequisites (skip if already installed)
@@ -182,6 +201,18 @@ Prioritizes **deploy** and **smoke test** workflows for overall status, so Depen
 | Config changes not taking effect | Click "Save & Apply" in Settings — no restart needed |
 | Build fails | Ensure Xcode Command Line Tools are installed: `xcode-select --install` |
 
+## Why Cat Eye?
+
+| | Cat Eye | Typical Electron app |
+|---|---|---|
+| **Binary** | 225 KB | 150–300 MB |
+| **Memory** | ~45 MB (0.3%) | 200–400 MB |
+| **CPU at idle** | 0% | 0.5–2% |
+| **Dependencies** | macOS + `gh` CLI | Node.js, Chromium, npm packages |
+| **Startup** | Instant | 2–5 seconds |
+
+Cat Eye is a single Swift file compiled to a native binary. No runtime, no garbage collector, no bundled browser engine. It wakes up every 30 seconds, runs a few `gh` CLI commands, updates a menu bar icon, and goes back to sleep.
+
 ## Process info
 
 | | |
@@ -189,7 +220,7 @@ Prioritizes **deploy** and **smoke test** workflows for overall status, so Depen
 | **Process name** | `cat-eye` |
 | **Spotlight name** | Cat Eye |
 | **Binary size** | ~225KB |
-| **Memory** | ~0.3% on 16GB Mac |
+| **Memory** | ~45 MB / 0.3% on 16GB Mac |
 | **Bundle ID** | `com.clintoncodewell.cat-eye` |
 
 ## License
