@@ -1,23 +1,34 @@
-# Cat's Eye
+# Cat Eye
 
-The octocat's eye never blinks. A lightweight native macOS menu bar app that watches your GitHub Actions so you don't have to. No Electron, no web views — just a 175KB Swift binary that sits quietly in your menu bar, glowing green or red.
+The octocat's eye never blinks. A lightweight native macOS menu bar app that watches your GitHub Actions and Pull Requests so you don't have to. No Electron, no web views — just a 224KB Swift binary that sits quietly in your menu bar, glowing green or red.
 
 ## Features
 
-- **Built-in setup** — login to GitHub and pick repos to track, all from the settings panel
+### Actions Tab
 - **Live status icon** — GitHub mark tinted green (passing), red (failing), or orange (running)
 - **Pulsing animation** — icon gently pulses when any action is actively running
 - **Rich popover** — scrollable list of recent runs across all your repos, styled like the GitHub Actions UI
 - **Per-run details** — workflow name, run number, branch badge, timestamps, and duration
 - **Calculated ETA** — estimates remaining time for running actions based on historical durations
 - **macOS notifications** — alerts when actions start or finish (success/failure), click to open the popover
-- **Copy URL** — one-click copy of any run's URL to clipboard
-- **Direct links** — click any run to open it in GitHub, or jump to a repo's Actions page
+
+### Pull Requests Tab
+- **Review queue** — shows PRs where your review is requested, across all tracked repos
+- **Expandable detail** — click any PR to expand inline with full description and labels
+- **PR actions** — approve, request changes, comment, merge (merge/rebase/squash), or close — all from the menu bar
+- **Inline comments** — type and submit comments without leaving the popover
+
+### General
+- **Tabbed interface** — switch between Actions and Pull Requests
+- **Repo filter** — "All Repos" or pick a specific repo; persists across tabs
+- **Built-in setup** — login to GitHub and pick repos to track from the settings panel
+- **Copy URL** — one-click copy of any run or PR URL to clipboard
+- **Direct links** — click to open runs or PRs in GitHub
 - **Multi-repo** — monitor as many repos as you want from a single widget
 - **Adaptive polling** — 30s when idle, 10s when actions are running (configurable)
 - **Hot-reload config** — change tracked repos from settings without restarting
 - **Auto-detects `gh` CLI** — finds your GitHub CLI install automatically
-- **Tiny footprint** — 175KB binary, ~0.3% memory, zero dependencies beyond macOS
+- **Tiny footprint** — 224KB binary, ~0.3% memory, zero dependencies beyond macOS
 
 ## Requirements
 
@@ -56,7 +67,7 @@ Reopen Settings any time via the gear icon in the footer.
 ln -sf "$(pwd)/CatEye.app" ~/Applications/CatEye.app
 ```
 
-Then search for **"Cat's Eye"** in Spotlight or Raycast.
+Then search for **"Cat Eye"** in Spotlight or Raycast.
 
 ### Auto-start on login
 
@@ -121,7 +132,7 @@ xcode-select --install
 
 ## How it works
 
-- Uses the `gh` CLI under the hood — no API tokens to manage, no OAuth flows. If `gh auth status` works, Cat's Eye works.
+- Uses the `gh` CLI under the hood — no API tokens to manage, no OAuth flows. If `gh auth status` works, Cat Eye works.
 - Fetches run data via `gh run list --json` for each configured repo, all concurrently.
 - Runs as a macOS accessory app (no Dock icon, no Cmd+Tab entry).
 - Notifications use the native `UserNotifications` framework — respects Do Not Disturb and Focus modes.
@@ -142,8 +153,8 @@ Prioritizes **deploy** and **smoke test** workflows for overall status, so Depen
 | | |
 |---|---|
 | **Process name** | `cat-eye` |
-| **Spotlight name** | Cat's Eye |
-| **Binary size** | ~175KB |
+| **Spotlight name** | Cat Eye |
+| **Binary size** | ~224KB |
 | **Memory** | ~0.3% on 16GB Mac |
 | **Bundle ID** | `com.clintoncodewell.cat-eye` |
 

@@ -78,6 +78,34 @@ struct Run: Decodable {
     let workflowName: String?
 }
 
+struct PRAuthor: Decodable { let login: String }
+struct PRLabel: Decodable { let name: String; let color: String? }
+struct PR: Decodable {
+    let number: Int
+    let title: String
+    let state: String
+    let author: PRAuthor
+    let headRefName: String
+    let baseRefName: String
+    let url: String
+    let createdAt: String
+    let updatedAt: String
+    let reviewDecision: String?
+    let additions: Int
+    let deletions: Int
+    let isDraft: Bool
+    let labels: [PRLabel]
+    let body: String?
+}
+
+enum PRAction {
+    case approve(String?)
+    case requestChanges(String)
+    case comment(String)
+    case merge(String)   // "-m", "-r", "-s"
+    case close
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 func ghShell(_ args: String...) -> Data? {
@@ -119,6 +147,37 @@ func fetchRuns(repo: String) -> [Run] {
     guard let data = ghShell("run", "list", "--repo", repo, "--limit", "\(RUNS_PER_REPO)", "--json", fields)
     else { return [] }
     return (try? JSONDecoder().decode([Run].self, from: data)) ?? []
+}
+
+func fetchPRs(repo: String) -> [PR] {
+    let fields = "number,title,state,author,headRefName,baseRefName,url,createdAt,updatedAt,reviewDecision,additions,deletions,isDraft,labels,body"
+    guard let data = ghShell("pr", "list", "--repo", repo, "--limit", "20", "--state", "open",
+                             "--search", "review-requested:@me", "--json", fields)
+    else { return [] }
+    return (try? JSONDecoder().decode([PR].self, from: data)) ?? []
+}
+
+func executePRAction(repo: String, number: Int, action: PRAction, completion: @escaping () -> Void) {
+    DispatchQueue.global(qos: .userInitiated).async {
+        let n = "\(number)", r = repo
+        switch action {
+        case .approve(let body):
+            if let b = body, !b.isEmpty {
+                _ = ghShell("pr", "review", "--approve", "-b", b, "-R", r, n)
+            } else {
+                _ = ghShell("pr", "review", "--approve", "-R", r, n)
+            }
+        case .requestChanges(let body):
+            _ = ghShell("pr", "review", "--request-changes", "-b", body, "-R", r, n)
+        case .comment(let body):
+            _ = ghShell("pr", "comment", "-b", body, "-R", r, n)
+        case .merge(let method):
+            _ = ghShell("pr", "merge", method, "-R", r, n)
+        case .close:
+            _ = ghShell("pr", "close", "-R", r, n)
+        }
+        DispatchQueue.main.async { completion() }
+    }
 }
 
 func getGHUser() -> String? { ghStr("api", "user", "--jq", ".login") }
@@ -231,6 +290,39 @@ func overallColor(_ g: [(String, [Run])]) -> NSColor {
 func hasActive(_ g: [(String, [Run])]) -> Bool {
     g.flatMap { $0.1 }.contains { $0.status == "in_progress" || $0.status == "queued" }
 }
+
+// ─── PR Helpers ──────────────────────────────────────────────────────────────
+
+func prReviewIcon(_ pr: PR) -> String {
+    if pr.isDraft { return "pencil.circle" }
+    switch pr.reviewDecision ?? "" {
+    case "APPROVED": return "checkmark.circle.fill"
+    case "CHANGES_REQUESTED": return "xmark.circle.fill"
+    case "REVIEW_REQUIRED": return "circle.badge.questionmark"
+    default: return "circle.dashed"
+    }
+}
+
+func prReviewColor(_ pr: PR) -> NSColor {
+    if pr.isDraft { return .systemGray }
+    switch pr.reviewDecision ?? "" {
+    case "APPROVED": return .systemGreen
+    case "CHANGES_REQUESTED": return .systemRed
+    case "REVIEW_REQUIRED": return .systemYellow
+    default: return .secondaryLabelColor
+    }
+}
+
+func prRelativeTime(_ iso: String) -> String {
+    guard let d = parseISO(iso) else { return "" }
+    let secs = -d.timeIntervalSinceNow
+    if secs < 60 { return "just now" }
+    if secs < 3600 { return "\(Int(secs/60))m ago" }
+    if secs < 86400 { return "\(Int(secs/3600))h ago" }
+    return "\(Int(secs/86400))d ago"
+}
+
+let PR_ROW_H: CGFloat = 60
 
 // ─── Icon ────────────────────────────────────────────────────────────────────
 
@@ -367,6 +459,269 @@ class RunRow: NSView {
     }
 }
 
+// ─── PR Row View ─────────────────────────────────────────────────────────────
+
+class PRRow: NSView {
+    let urlStr: String
+    var onToggle: (() -> Void)?
+    var trackingArea: NSTrackingArea?
+
+    init(_ pr: PR, repo: String, w: CGFloat, expanded: Bool) {
+        self.urlStr = pr.url
+        super.init(frame: NSRect(x: 0, y: 0, width: w, height: PR_ROW_H))
+        wantsLayer = true
+        if expanded { layer?.backgroundColor = NSColor.selectedContentBackgroundColor.withAlphaComponent(0.1).cgColor }
+        build(pr, repo: repo, w: w)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    func build(_ pr: PR, repo: String, w: CGFloat) {
+        let pad: CGFloat = 12, iconSz: CGFloat = 20
+        let textX = pad + iconSz + 10, linkW: CGFloat = 28, copyW: CGFloat = 28
+        let rightW: CGFloat = 140
+        let textW = w - textX - rightW - linkW - copyW
+
+        // Review status icon
+        let iv = NSImageView(frame: NSRect(x: pad, y: (PR_ROW_H - iconSz) / 2, width: iconSz, height: iconSz))
+        if let img = NSImage(systemSymbolName: prReviewIcon(pr), accessibilityDescription: nil) {
+            iv.image = img; iv.contentTintColor = prReviewColor(pr)
+            iv.symbolConfiguration = .init(pointSize: 14, weight: .semibold)
+        }
+        addSubview(iv)
+
+        // Title
+        let title = lbl(String(pr.title.prefix(70)), .systemFont(ofSize: 12.5, weight: .semibold))
+        title.frame = NSRect(x: textX, y: PR_ROW_H - 24, width: textW, height: 18)
+        title.lineBreakMode = .byTruncatingTail
+        addSubview(title)
+
+        // Subtitle: #number by author + branch
+        let subText = "#\(pr.number) by \(pr.author.login)"
+        let sub = lbl(subText, .systemFont(ofSize: 11), .secondaryLabelColor)
+        sub.frame = NSRect(x: textX, y: 6, width: textW * 0.5, height: 16)
+        sub.lineBreakMode = .byTruncatingTail
+        addSubview(sub)
+
+        // Branch badge
+        let branchText = String(pr.headRefName.prefix(18))
+        let badge = Badge(branchText)
+        badge.frame.origin = NSPoint(x: textX + textW * 0.5, y: 8)
+        addSubview(badge)
+
+        // Right side: +/- and time
+        let rX = w - rightW - linkW - copyW
+        let diffText = "+\(pr.additions) -\(pr.deletions)"
+        let diffLabel = lbl(diffText, .monospacedDigitSystemFont(ofSize: 10, weight: .medium), .secondaryLabelColor)
+        diffLabel.alignment = .right
+        diffLabel.frame = NSRect(x: rX, y: PR_ROW_H - 22, width: rightW - 4, height: 14)
+        addSubview(diffLabel)
+
+        let timeLabel = lbl(prRelativeTime(pr.updatedAt), .systemFont(ofSize: 10), .tertiaryLabelColor)
+        timeLabel.alignment = .right
+        timeLabel.frame = NSRect(x: rX, y: 6, width: rightW - 4, height: 14)
+        addSubview(timeLabel)
+
+        // Draft badge
+        if pr.isDraft {
+            let draft = lbl("Draft", .systemFont(ofSize: 9, weight: .medium), .systemGray)
+            draft.frame = NSRect(x: rX, y: PR_ROW_H / 2 - 6, width: 32, height: 12)
+            addSubview(draft)
+        }
+
+        // Open in GitHub button
+        let linkBtn = NSButton(frame: NSRect(x: w - linkW - copyW - 4, y: (PR_ROW_H - 24) / 2, width: linkW, height: 24))
+        if let img = NSImage(systemSymbolName: "arrow.up.right.square", accessibilityDescription: "Open in GitHub") { linkBtn.image = img }
+        linkBtn.bezelStyle = .recessed; linkBtn.isBordered = false; linkBtn.imagePosition = .imageOnly
+        linkBtn.target = self; linkBtn.action = #selector(openURL)
+        addSubview(linkBtn)
+
+        // Copy URL button
+        let cpBtn = NSButton(frame: NSRect(x: w - copyW - 4, y: (PR_ROW_H - 24) / 2, width: copyW, height: 24))
+        if let img = NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: "Copy URL") { cpBtn.image = img }
+        cpBtn.bezelStyle = .recessed; cpBtn.isBordered = false; cpBtn.imagePosition = .imageOnly
+        cpBtn.target = self; cpBtn.action = #selector(copyURL); cpBtn.toolTip = "Copy PR URL"
+        addSubview(cpBtn)
+
+        // Separator
+        let sep = NSView(frame: NSRect(x: textX, y: 0, width: w - textX - pad, height: 0.5))
+        sep.wantsLayer = true; sep.layer?.backgroundColor = NSColor.separatorColor.cgColor
+        addSubview(sep)
+    }
+
+    func lbl(_ text: String, _ font: NSFont, _ color: NSColor = .labelColor) -> NSTextField {
+        let l = NSTextField(labelWithString: text)
+        l.font = font; l.textColor = color; l.maximumNumberOfLines = 1
+        l.cell?.truncatesLastVisibleLine = true; return l
+    }
+
+    @objc func openURL() { if let u = URL(string: urlStr) { NSWorkspace.shared.open(u) } }
+    @objc func copyURL() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(urlStr, forType: .string)
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let t = trackingArea { removeTrackingArea(t) }
+        trackingArea = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways], owner: self)
+        addTrackingArea(trackingArea!)
+    }
+    override func mouseEntered(with event: NSEvent) {
+        layer?.backgroundColor = NSColor.selectedContentBackgroundColor.withAlphaComponent(0.15).cgColor
+    }
+    override func mouseExited(with event: NSEvent) {
+        layer?.backgroundColor = nil
+    }
+    override func mouseDown(with event: NSEvent) {
+        layer?.backgroundColor = NSColor.selectedContentBackgroundColor.withAlphaComponent(0.25).cgColor
+    }
+    override func mouseUp(with event: NSEvent) {
+        layer?.backgroundColor = nil
+        let loc = convert(event.locationInWindow, from: nil)
+        guard bounds.contains(loc) else { return }
+        for sub in subviews where sub is NSButton { if sub.frame.contains(loc) { return } }
+        onToggle?()
+    }
+}
+
+// ─── PR Detail View ──────────────────────────────────────────────────────────
+
+class PRDetailView: NSView {
+    var onAction: ((PRAction) -> Void)?
+    var confirmingClose = false
+    var commentField: NSTextField!
+
+    init(_ pr: PR, repo: String, w: CGFloat) {
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.4).cgColor
+        let pad: CGFloat = 42, rPad: CGFloat = 16
+        let contentW = w - pad - rPad
+        var y: CGFloat = 8
+
+        // Body text
+        let bodyText = String((pr.body ?? "No description.").prefix(500))
+        let bodyAttrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 11.5)]
+        let bodyRect = (bodyText as NSString).boundingRect(
+            with: NSSize(width: contentW, height: 100),
+            options: [.usesLineFragmentOrigin], attributes: bodyAttrs)
+        let bodyH = min(ceil(bodyRect.height) + 4, 100)
+        let bodyLabel = NSTextField(wrappingLabelWithString: bodyText)
+        bodyLabel.font = .systemFont(ofSize: 11.5); bodyLabel.textColor = .secondaryLabelColor
+        bodyLabel.frame = NSRect(x: pad, y: y, width: contentW, height: bodyH)
+        bodyLabel.maximumNumberOfLines = 6
+        addSubview(bodyLabel)
+        y += bodyH + 8
+
+        // Labels
+        if !pr.labels.isEmpty {
+            var lx: CGFloat = pad
+            for label in pr.labels.prefix(5) {
+                let lb = Badge(label.name)
+                lb.frame.origin = NSPoint(x: lx, y: y)
+                addSubview(lb)
+                lx += lb.frame.width + 6
+            }
+            y += 24
+        }
+
+        // Separator
+        let sep1 = NSView(frame: NSRect(x: pad, y: y, width: contentW, height: 0.5))
+        sep1.wantsLayer = true; sep1.layer?.backgroundColor = NSColor.separatorColor.cgColor
+        addSubview(sep1); y += 8
+
+        // Action buttons row
+        let btnH: CGFloat = 24
+        var bx: CGFloat = pad
+
+        let approveBtn = makeBtn("Approve", color: .systemGreen, x: bx, y: y, h: btnH)
+        approveBtn.target = self; approveBtn.action = #selector(doApprove)
+        addSubview(approveBtn); bx += approveBtn.frame.width + 6
+
+        let changesBtn = makeBtn("Changes", color: .systemOrange, x: bx, y: y, h: btnH)
+        changesBtn.target = self; changesBtn.action = #selector(doRequestChanges)
+        addSubview(changesBtn); bx += changesBtn.frame.width + 6
+
+        let mergePopup = NSPopUpButton(frame: NSRect(x: bx, y: y, width: 130, height: btnH), pullsDown: false)
+        mergePopup.addItems(withTitles: ["Merge commit", "Rebase", "Squash"])
+        mergePopup.font = .systemFont(ofSize: 11)
+        addSubview(mergePopup); mergePopup.tag = 100; bx += 136
+
+        let mergeBtn = makeBtn("Merge", color: .systemPurple, x: bx, y: y, h: btnH)
+        mergeBtn.target = self; mergeBtn.action = #selector(doMerge)
+        addSubview(mergeBtn); bx += mergeBtn.frame.width + 6
+
+        let closeBtn = makeBtn("Close", color: .systemRed, x: bx, y: y, h: btnH)
+        closeBtn.target = self; closeBtn.action = #selector(doClose(_:))
+        closeBtn.tag = 200
+        addSubview(closeBtn)
+        y += btnH + 10
+
+        // Comment field + submit
+        let sep2 = NSView(frame: NSRect(x: pad, y: y, width: contentW, height: 0.5))
+        sep2.wantsLayer = true; sep2.layer?.backgroundColor = NSColor.separatorColor.cgColor
+        addSubview(sep2); y += 8
+
+        let cf = NSTextField(frame: NSRect(x: pad, y: y, width: contentW - 80, height: 24))
+        cf.placeholderString = "Leave a comment..."
+        cf.font = .systemFont(ofSize: 11.5)
+        addSubview(cf); commentField = cf
+
+        let submitBtn = makeBtn("Comment", color: .linkColor, x: pad + contentW - 72, y: y, h: 24)
+        submitBtn.target = self; submitBtn.action = #selector(doComment)
+        addSubview(submitBtn)
+        y += 32
+
+        self.frame = NSRect(x: 0, y: 0, width: w, height: y)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    func makeBtn(_ title: String, color: NSColor, x: CGFloat, y: CGFloat, h: CGFloat) -> NSButton {
+        let b = NSButton(title: title, target: nil, action: nil)
+        b.bezelStyle = .inline; b.font = .systemFont(ofSize: 11, weight: .medium)
+        b.contentTintColor = color
+        let tw = (title as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 11, weight: .medium)]).width
+        b.frame = NSRect(x: x, y: y, width: tw + 20, height: h)
+        return b
+    }
+
+    @objc func doApprove() {
+        let body = commentField.stringValue.isEmpty ? nil : commentField.stringValue
+        onAction?(.approve(body))
+    }
+    @objc func doRequestChanges() {
+        let body = commentField.stringValue
+        guard !body.isEmpty else { commentField.placeholderString = "Required: describe changes needed"; return }
+        onAction?(.requestChanges(body))
+    }
+    @objc func doComment() {
+        let body = commentField.stringValue
+        guard !body.isEmpty else { return }
+        onAction?(.comment(body))
+    }
+    @objc func doMerge() {
+        let popup = subviews.compactMap { $0 as? NSPopUpButton }.first(where: { $0.tag == 100 })
+        let methods = ["-m", "-r", "-s"]
+        let method = methods[popup?.indexOfSelectedItem ?? 0]
+        onAction?(.merge(method))
+    }
+    @objc func doClose(_ sender: NSButton) {
+        if confirmingClose {
+            onAction?(.close)
+        } else {
+            confirmingClose = true
+            sender.title = "Sure?"; sender.contentTintColor = .white
+            sender.layer?.backgroundColor = NSColor.systemRed.cgColor; sender.layer?.cornerRadius = 4
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+                guard let self = self, self.confirmingClose else { return }
+                self.confirmingClose = false
+                sender.title = "Close"; sender.contentTintColor = .systemRed
+                sender.layer?.backgroundColor = nil
+            }
+        }
+    }
+}
+
 // ─── Shared Views ────────────────────────────────────────────────────────────
 
 class Badge: NSView {
@@ -473,49 +828,184 @@ class Footer: NSView {
     required init?(coder: NSCoder) { fatalError() }
 }
 
-// ─── List View ───────────────────────────────────────────────────────────────
+// ─── Tab View (Actions + PRs) ────────────────────────────────────────────────
 
-class ListVC: NSViewController {
+let TAB_H: CGFloat = 36
+
+class TabVC: NSViewController {
     let grouped: [(String, [Run])]
+    let prGrouped: [(String, [PR])]
     let updated: Date
     let loading: Bool
+    var selectedTab: Int
+    var selectedRepo: String?
+    var expandedPR: String?
+    var scrollView: NSScrollView!
+    var doc: Flipped!
 
-    init(_ grouped: [(String, [Run])], updated: Date, loading: Bool) {
-        self.grouped = grouped; self.updated = updated; self.loading = loading
+    init(grouped: [(String, [Run])], prGrouped: [(String, [PR])], updated: Date, loading: Bool,
+         tab: Int, repo: String?, expandedPR: String? = nil) {
+        self.grouped = grouped; self.prGrouped = prGrouped
+        self.updated = updated; self.loading = loading
+        self.selectedTab = tab; self.selectedRepo = repo; self.expandedPR = expandedPR
         super.init(nibName: nil, bundle: nil)
     }
     required init?(coder: NSCoder) { fatalError() }
 
     override func loadView() {
         let w = POP_W
+        let container = Flipped(frame: NSRect(x: 0, y: 0, width: w, height: POP_MAX_H))
+        container.wantsLayer = true
+
+        // ── Top bar: tabs + repo filter ──
+        let topBar = NSView(frame: NSRect(x: 0, y: 0, width: w, height: TAB_H))
+        topBar.wantsLayer = true
+        topBar.layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.9).cgColor
+
+        let seg = NSSegmentedControl(labels: ["Actions", "Pull Requests"], trackingMode: .selectOne, target: self, action: #selector(tabChanged(_:)))
+        seg.selectedSegment = selectedTab
+        seg.frame = NSRect(x: 12, y: 6, width: 200, height: 24)
+        seg.font = .systemFont(ofSize: 11, weight: .medium)
+        topBar.addSubview(seg)
+
+        let repoFilter = NSPopUpButton(frame: NSRect(x: w - 200, y: 6, width: 188, height: 24), pullsDown: false)
+        repoFilter.font = .systemFont(ofSize: 11)
+        repoFilter.addItem(withTitle: "All Repos")
+        for repo in REPOS { repoFilter.addItem(withTitle: repo.components(separatedBy: "/").last ?? repo) }
+        if let sel = selectedRepo, let idx = REPOS.firstIndex(of: sel) { repoFilter.selectItem(at: idx + 1) }
+        else { repoFilter.selectItem(at: 0) }
+        repoFilter.target = self; repoFilter.action = #selector(repoChanged(_:))
+        repoFilter.tag = 300
+        topBar.addSubview(repoFilter)
+        container.addSubview(topBar)
+
+        // ── Footer (fixed at bottom) ──
+        let footer = Footer(w, updated: updated)
+
+        // ── Scroll content ──
+        let scrollH = POP_MAX_H - TAB_H - FTR_H
+        scrollView = NSScrollView(frame: NSRect(x: 0, y: TAB_H, width: w, height: scrollH))
+        scrollView.hasVerticalScroller = true; scrollView.drawsBackground = false; scrollView.autohidesScrollers = true
+        doc = Flipped(frame: NSRect(x: 0, y: 0, width: w, height: scrollH))
+        doc.wantsLayer = true
+        doc.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.65).cgColor
+        scrollView.documentView = doc
+        container.addSubview(scrollView)
+
+        rebuildContent()
+
+        // Size the popover based on content
+        let contentH = doc.frame.height
+        let visScrollH = min(contentH, scrollH)
+        let totalH = TAB_H + visScrollH + FTR_H
+        scrollView.frame.size.height = visScrollH
+        footer.frame.origin.y = TAB_H + visScrollH
+        container.addSubview(footer)
+        container.frame.size.height = totalH
+
+        self.view = container
+        self.preferredContentSize = NSSize(width: w, height: totalH)
+    }
+
+    func rebuildContent() {
+        doc.subviews.forEach { $0.removeFromSuperview() }
+        let w = POP_W
         var rows: [NSView] = []
 
         if REPOS.isEmpty {
             rows.append(EmptyRow("No repos configured. Open Settings to get started.", w: w))
-        } else if loading && grouped.isEmpty {
-            rows.append(EmptyRow("Loading actions...", w: w))
+        } else if selectedTab == 0 {
+            rows = buildActionsContent(w)
         } else {
-            for (repo, runs) in grouped {
-                rows.append(Header(repo, w: w))
-                if runs.isEmpty { rows.append(EmptyRow("No recent runs", w: w)) }
-                else { for run in runs { rows.append(RunRow(run, history: runs, w: w)) } }
-            }
+            rows = buildPRContent(w)
         }
-        rows.append(Footer(w, updated: updated))
 
-        let totalH = rows.reduce(0) { $0 + $1.frame.height }
-        let doc = Flipped(frame: NSRect(x: 0, y: 0, width: w, height: totalH))
-        doc.wantsLayer = true
-        doc.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.65).cgColor
         var y: CGFloat = 0
         for row in rows { row.frame.origin = NSPoint(x: 0, y: y); doc.addSubview(row); y += row.frame.height }
+        doc.frame.size.height = max(y, 60)
+    }
 
-        let visH = min(totalH, POP_MAX_H)
-        let sv = NSScrollView(frame: NSRect(x: 0, y: 0, width: w, height: visH))
-        sv.hasVerticalScroller = true; sv.drawsBackground = false
-        sv.documentView = doc; sv.autohidesScrollers = true
-        self.view = sv
-        self.preferredContentSize = NSSize(width: w, height: visH)
+    func filteredGrouped() -> [(String, [Run])] {
+        guard let sel = selectedRepo else { return grouped }
+        return grouped.filter { $0.0 == sel }
+    }
+
+    func filteredPRs() -> [(String, [PR])] {
+        guard let sel = selectedRepo else { return prGrouped }
+        return prGrouped.filter { $0.0 == sel }
+    }
+
+    func buildActionsContent(_ w: CGFloat) -> [NSView] {
+        var rows: [NSView] = []
+        let data = filteredGrouped()
+        if loading && data.isEmpty {
+            rows.append(EmptyRow("Loading actions...", w: w)); return rows
+        }
+        for (repo, runs) in data {
+            rows.append(Header(repo, w: w))
+            if runs.isEmpty { rows.append(EmptyRow("No recent runs", w: w)) }
+            else { for run in runs { rows.append(RunRow(run, history: runs, w: w)) } }
+        }
+        if rows.isEmpty { rows.append(EmptyRow("No actions to show", w: w)) }
+        return rows
+    }
+
+    func buildPRContent(_ w: CGFloat) -> [NSView] {
+        var rows: [NSView] = []
+        let data = filteredPRs()
+        let hasPRs = data.contains { !$0.1.isEmpty }
+        if !hasPRs {
+            rows.append(EmptyRow("No pull requests awaiting your review", w: w))
+            return rows
+        }
+        for (repo, prs) in data {
+            if prs.isEmpty { continue }
+            rows.append(Header(repo, w: w))
+            for pr in prs {
+                let key = "\(repo)#\(pr.number)"
+                let isExpanded = expandedPR == key
+                let row = PRRow(pr, repo: repo, w: w, expanded: isExpanded)
+                row.onToggle = { [weak self] in
+                    guard let self = self else { return }
+                    self.expandedPR = self.expandedPR == key ? nil : key
+                    self.rebuildContent()
+                }
+                rows.append(row)
+                if isExpanded {
+                    let detail = PRDetailView(pr, repo: repo, w: w)
+                    detail.onAction = { [weak self] action in
+                        self?.handlePRAction(repo: repo, pr: pr, action: action)
+                    }
+                    rows.append(detail)
+                }
+            }
+        }
+        return rows
+    }
+
+    func handlePRAction(repo: String, pr: PR, action: PRAction) {
+        executePRAction(repo: repo, number: pr.number, action: action) {
+            (NSApp.delegate as? GHActionsBar)?.doRefresh()
+        }
+    }
+
+    @objc func tabChanged(_ sender: NSSegmentedControl) {
+        selectedTab = sender.selectedSegment
+        (NSApp.delegate as? GHActionsBar)?.selectedTab = selectedTab
+        expandedPR = nil
+        rebuildContent()
+    }
+
+    @objc func repoChanged(_ sender: NSPopUpButton) {
+        if sender.indexOfSelectedItem == 0 {
+            selectedRepo = nil
+        } else {
+            let idx = sender.indexOfSelectedItem - 1
+            if idx < REPOS.count { selectedRepo = REPOS[idx] }
+        }
+        (NSApp.delegate as? GHActionsBar)?.selectedRepo = selectedRepo
+        expandedPR = nil
+        rebuildContent()
     }
 }
 
@@ -781,11 +1271,14 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
     var animTimer: Timer?
     var animPhase: CGFloat = 0
     var grouped: [(String, [Run])] = []
+    var prGrouped: [(String, [PR])] = []
     var lastUpdate = Date()
     var closeTime = Date.distantPast
     var firstLoad = true
     var ghIcon: NSImage?
     var prevStatuses: [String: String] = [:]
+    var selectedTab: Int = 0
+    var selectedRepo: String? = nil
 
     func applicationDidFinishLaunching(_ note: Notification) {
         loadConfig()
@@ -836,19 +1329,26 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
         guard !REPOS.isEmpty else { completion?(); return }
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self = self else { return }
-            var res = Array(repeating: (String, [Run])("", []), count: REPOS.count)
+            var runRes = Array(repeating: (String, [Run])("", []), count: REPOS.count)
+            var prRes = Array(repeating: (String, [PR])("", []), count: REPOS.count)
             let group = DispatchGroup()
             for (i, repo) in REPOS.enumerated() {
                 group.enter()
                 DispatchQueue.global(qos: .utility).async {
-                    res[i] = (repo, fetchRuns(repo: repo))
+                    runRes[i] = (repo, fetchRuns(repo: repo))
+                    group.leave()
+                }
+                group.enter()
+                DispatchQueue.global(qos: .utility).async {
+                    prRes[i] = (repo, fetchPRs(repo: repo))
                     group.leave()
                 }
             }
             group.wait()
             DispatchQueue.main.async {
-                self.detectTransitions(res)
-                self.grouped = res
+                self.detectTransitions(runRes)
+                self.grouped = runRes
+                self.prGrouped = prRes
                 self.lastUpdate = Date()
                 self.firstLoad = false
                 self.updateIcon()
@@ -939,11 +1439,16 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
 
     // MARK: - Popover
 
+    func makeTabVC() -> TabVC {
+        TabVC(grouped: grouped, prGrouped: prGrouped, updated: lastUpdate, loading: firstLoad,
+              tab: selectedTab, repo: selectedRepo)
+    }
+
     @objc func toggle() {
         if popover.isShown { popover.close() }
         else if Date().timeIntervalSince(closeTime) > 0.3 {
-            if popover.contentViewController == nil || popover.contentViewController is ListVC {
-                popover.contentViewController = ListVC(grouped, updated: lastUpdate, loading: firstLoad)
+            if popover.contentViewController == nil || popover.contentViewController is TabVC {
+                popover.contentViewController = makeTabVC()
             }
             NSApp.activate(ignoringOtherApps: true)
             popover.show(relativeTo: statusItem.button!.bounds, of: statusItem.button!, preferredEdge: .minY)
@@ -959,7 +1464,7 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
     }
 
     @objc func showList() {
-        popover.contentViewController = ListVC(grouped, updated: lastUpdate, loading: firstLoad)
+        popover.contentViewController = makeTabVC()
     }
 
     @objc func doRefresh() {
