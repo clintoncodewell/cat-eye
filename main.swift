@@ -111,20 +111,40 @@ enum PRAction {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+var lastFetchError: String? = nil  // Shown in UI when gh fails
+
 func ghShell(_ args: String...) -> Data? {
+    guard FileManager.default.isExecutableFile(atPath: GH) else {
+        lastFetchError = "GitHub CLI not found at \(GH)"
+        return nil
+    }
     let proc = Process()
     proc.executableURL = URL(fileURLWithPath: GH)
     proc.arguments = Array(args)
     proc.environment = ProcessInfo.processInfo.environment
-    let pipe = Pipe()
-    proc.standardOutput = pipe
-    proc.standardError = FileHandle.nullDevice
+    let outPipe = Pipe()
+    let errPipe = Pipe()
+    proc.standardOutput = outPipe
+    proc.standardError = errPipe
     do {
         try proc.run()
         proc.waitUntilExit()
-        guard proc.terminationStatus == 0 else { return nil }
-        return pipe.fileHandleForReading.readDataToEndOfFile()
-    } catch { return nil }
+        guard proc.terminationStatus == 0 else {
+            let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+            let errStr = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if errStr.contains("auth") || errStr.contains("login") {
+                lastFetchError = "Not authenticated. Run: gh auth login"
+            } else if !errStr.isEmpty {
+                lastFetchError = String(errStr.prefix(120))
+            }
+            return nil
+        }
+        lastFetchError = nil
+        return outPipe.fileHandleForReading.readDataToEndOfFile()
+    } catch {
+        lastFetchError = "Failed to run gh: \(error.localizedDescription)"
+        return nil
+    }
 }
 
 func ghStr(_ args: String...) -> String? {
@@ -473,6 +493,18 @@ class RunRow: NSView {
         for sub in subviews where sub is NSButton { if sub.frame.contains(loc) { return } }
         if let url = URL(string: urlStr) { NSWorkspace.shared.open(url) }
     }
+
+    // Keyboard accessibility
+    override var acceptsFirstResponder: Bool { true }
+    override var focusRingType: NSFocusRingType {
+        get { .exterior }
+        set {}
+    }
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 36 || event.keyCode == 49 { // Return or Space
+            if let url = URL(string: urlStr) { NSWorkspace.shared.open(url) }
+        } else { super.keyDown(with: event) }
+    }
 }
 
 // ─── PR Row View ─────────────────────────────────────────────────────────────
@@ -512,11 +544,20 @@ class PRRow: NSView {
         title.lineBreakMode = .byTruncatingTail
         addSubview(title)
 
-        // Subtitle: #number by author + branch
-        let subText = "#\(pr.number) by \(pr.author.login)"
-        let sub = lbl(subText, .systemFont(ofSize: 11), .secondaryLabelColor)
+        // Subtitle: #number by author + branch (bold number)
+        let sub = NSTextField(labelWithString: "")
+        let subAttr = NSMutableAttributedString()
+        subAttr.append(NSAttributedString(string: "#\(pr.number)", attributes: [
+            .font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold),
+            .foregroundColor: NSColor.labelColor,
+        ]))
+        subAttr.append(NSAttributedString(string: " by \(pr.author.login)", attributes: [
+            .font: NSFont.systemFont(ofSize: 11),
+            .foregroundColor: NSColor.secondaryLabelColor,
+        ]))
+        sub.attributedStringValue = subAttr
         sub.frame = NSRect(x: textX, y: 6, width: textW * 0.5, height: 16)
-        sub.lineBreakMode = .byTruncatingTail
+        sub.lineBreakMode = .byTruncatingTail; sub.maximumNumberOfLines = 1
         addSubview(sub)
 
         // Branch badge
@@ -605,6 +646,17 @@ class PRRow: NSView {
         guard bounds.contains(loc) else { return }
         for sub in subviews where sub is NSButton { if sub.frame.contains(loc) { return } }
         onToggle?()
+    }
+
+    // Keyboard accessibility
+    override var acceptsFirstResponder: Bool { true }
+    override var focusRingType: NSFocusRingType {
+        get { .exterior }
+        set {}
+    }
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 36 || event.keyCode == 49 { onToggle?() }
+        else { super.keyDown(with: event) }
     }
 }
 
@@ -709,24 +761,37 @@ class PRDetailView: NSView {
         return b
     }
 
+    func disableActions(_ message: String) {
+        for sub in subviews where sub is NSButton {
+            (sub as! NSButton).isEnabled = false
+        }
+        commentField.isEnabled = false
+        commentField.stringValue = ""
+        commentField.placeholderString = message
+    }
+
     @objc func doApprove() {
         let body = commentField.stringValue.isEmpty ? nil : commentField.stringValue
+        disableActions("Approving...")
         onAction?(.approve(body))
     }
     @objc func doRequestChanges() {
         let body = commentField.stringValue
         guard !body.isEmpty else { commentField.placeholderString = "Required: describe changes needed"; return }
+        disableActions("Submitting review...")
         onAction?(.requestChanges(body))
     }
     @objc func doComment() {
         let body = commentField.stringValue
         guard !body.isEmpty else { return }
+        disableActions("Posting comment...")
         onAction?(.comment(body))
     }
     @objc func doMerge() {
         let popup = subviews.compactMap { $0 as? NSPopUpButton }.first(where: { $0.tag == 100 })
         let methods = ["-m", "-r", "-s"]
         let method = methods[popup?.indexOfSelectedItem ?? 0]
+        disableActions("Merging...")
         onAction?(.merge(method))
     }
     @objc func doClose(_ sender: NSButton) {
@@ -823,6 +888,22 @@ class EmptyRow: NSView {
 }
 
 class Flipped: NSView { override var isFlipped: Bool { true } }
+
+class LoadingRow: NSView {
+    init(w: CGFloat) {
+        super.init(frame: NSRect(x: 0, y: 0, width: w, height: 48))
+        let spinner = NSProgressIndicator(frame: NSRect(x: 16, y: 14, width: 20, height: 20))
+        spinner.style = .spinning
+        spinner.controlSize = .small
+        spinner.startAnimation(nil)
+        addSubview(spinner)
+        let l = NSTextField(labelWithString: "Loading...")
+        l.font = .systemFont(ofSize: 12); l.textColor = .secondaryLabelColor
+        l.frame = NSRect(x: 44, y: 14, width: w - 56, height: 20)
+        addSubview(l)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+}
 
 // ─── Footer ──────────────────────────────────────────────────────────────────
 
@@ -971,8 +1052,12 @@ class TabVC: NSViewController {
     func buildActionsContent(_ w: CGFloat) -> [NSView] {
         var rows: [NSView] = []
         let data = filteredGrouped()
+        if let err = lastFetchError {
+            rows.append(EmptyRow(err, w: w, icon: "exclamationmark.triangle"))
+            return rows
+        }
         if loading && data.isEmpty {
-            rows.append(EmptyRow("Loading actions...", w: w, icon: "arrow.clockwise")); return rows
+            rows.append(LoadingRow(w: w)); return rows
         }
         for (repo, runs) in data {
             rows.append(Header(repo, w: w))
@@ -1001,6 +1086,9 @@ class TabVC: NSViewController {
                 row.onToggle = { [weak self] in
                     guard let self = self else { return }
                     self.expandedPR = self.expandedPR == key ? nil : key
+                    // Semitransient when expanded (prevents accidental close while typing comment)
+                    let appDel = NSApp.delegate as? GHActionsBar
+                    appDel?.popover.behavior = self.expandedPR != nil ? .semitransient : .transient
                     self.rebuildContent()
                 }
                 rows.append(row)
@@ -1196,12 +1284,19 @@ class SettingsVC: NSViewController {
     }
 
     func updateAuthUI() {
+        guard let sl = statusLabel else { return }
         if let user = username {
-            statusLabel?.stringValue = "Logged in as \(user)"
-            statusLabel?.textColor = .labelColor
+            let attr = NSMutableAttributedString()
+            attr.append(NSAttributedString(string: "Authenticated as ", attributes: [
+                .font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.secondaryLabelColor,
+            ]))
+            attr.append(NSAttributedString(string: user, attributes: [
+                .font: NSFont.systemFont(ofSize: 12, weight: .semibold), .foregroundColor: NSColor.labelColor,
+            ]))
+            sl.attributedStringValue = attr
         } else {
-            statusLabel?.stringValue = "Not authenticated"
-            statusLabel?.textColor = .systemRed
+            sl.stringValue = "Not authenticated — click Login"
+            sl.textColor = .systemRed
         }
     }
 
