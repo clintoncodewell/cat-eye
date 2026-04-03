@@ -58,6 +58,9 @@ let POP_MAX_H: CGFloat = 700
 let ROW_H: CGFloat = 56
 let HDR_H: CGFloat = 32
 let FTR_H: CGFloat = 40
+let PAD: CGFloat = 12
+let ICON_SZ: CGFloat = 20
+let TEXT_X: CGFloat = 42     // PAD + ICON_SZ + 10
 
 let GH_ICON_B64 = "iVBORw0KGgoAAAANSUhEUgAAACQAAAAkCAYAAADhAJiYAAAABGdBTUEAALGPC/xhBQAAACBjSFJNAAB6JgAAgIQAAPoAAACA6AAAdTAAAOpgAAA6mAAAF3CculE8AAAAeGVYSWZNTQAqAAAACAAEARoABQAAAAEAAAA+ARsABQAAAAEAAABGASgAAwAAAAEAAgAAh2kABAAAAAEAAABOAAAAAAAAAEgAAAABAAAASAAAAAEAA6ABAAMAAAABAAEAAKACAAQAAAABAAAAJKADAAQAAAABAAAAJAAAAAAZgdfLAAAACXBIWXMAAAsTAAALEwEAmpwYAAAEkUlEQVRYCbWYTYyNVxjH5/pWE0NKqI9LlFawqCDtQiZWIsFOWSBIdWdj126mkerSx6IhkQjx0W5KSOxI2liw8LXoYDBhYoj4iJoxPovb3+/2vjfnnnnvuDPzzj/5zXve5zznOc8973nPOe/k6nqhQqEwGvdGWADzYDZMhQZQHdAOLdAMl+BsLpfr5JqdSCQPO6EFOuAVvIV38AESWdZmnT5dcB9sm+9XRgTIwXhognvwHOystzLJTjCGsYyZ61VyNBgGc+AEtENWMpYxjT2spqRwrIf5sAOeQdYyprHtoz5OalBowMGsZ8FKWA/JZKWYmYxpbPv4otRn9+BUDAKH0uwfQaJ/KbwAr33Vexo6B98EAezDvuyzYmCK2WF0sh2H8DEZ6DochSvg5DQxJ6ry6kTXlpDUYSrWmUgr7IHzJRuXouzLPsd3GyKMvgHxBHZkNiTOlFfBX/APmMBjuAx/BjykbJ2v/QVYFbRfwr1LQSj7bEp8ilcMefC1jOWv+yp05t5JP1FCe1hO6vWN7NOxOcqx7Lu4TiXPbisN0yZwAburb6gX3DwqEdrDsvUPQd9aZN/mUOdEdjtYDaM0RBrM/dehjW2gAB8ktIflUr1+/qBQU7hJWxRHYl9mLo5QI5hh7Pge2wNwX8pKbQQyprFD+cM/g0YTWghDINYrDKehLa7ox/0T2h6DlykxhmNbYEJzIZlLoZ+NTjLsz0Jjf8rEek3738CY8eN0lOaZiEcIb0Lp3AXnQmMWZZL6mziO1LsonjnMNqGpEI/QG2wPaJztOYagJTmP7CNUMRf/pL3uoeNAlJ8TNB4h+2mIR2YgOk+L6VKT9iIVH1W88BlgBExmXRio0fuS+BWruJ2iDkeoHdIWuU+wL4JMxY80prFjmUO7CbnwxQuVzq7c31rIWMuJl5aQObSY0FVIGyEXqsX8om+4ZiJiuQ0tBadELBNqNqGL4IIVy0k3E9YSaBrEW0vsX/XetjAZh3XgJ5Qn01gmdKkOx9Hg503yRfGa8lN4Ap5r1C6YAQ0wElLfkLAHfAbDCLCNx45tUE0e6jyC+Paxhv/foWcfdRZ+gI1wFZJE71L+BdbAXEgb9iSeiXwOy+FnaIaeZN+7io1LCYUHNE+DZ8DjgK/+FYjlsXZ7OUBUsA70qVXlA1o5FC09wlqhfFTXwKGWO+D5OtFBChUnyXIgCtbBAahF9tmUtA/nwl6M88EFywVxEmyCbbACNsM4aAOPJW6S1WTd3WqVgd1F+QLYd6XI0tNj+BnkRPO7XNsQGAufgi+BS0KPwucn6Empn0HlEWJnN4FWejkCZr4FJsAh+ANug5uik/kGXIO+6jENf4VT0GrfSaByQhqo8L8Wtyjq6GP7Dlw3PKt4aHe9Ggq/Q18T8sceBvu4aZ9cy6pISCsOfjc1U9wP02AhxBPY594X3afRRTC2I1ORjAFdqbtJR3AE1sJuMFAXxMdOTFWlr4/CFdhHbYx98D1cT0sGe21ixPKwE5zkfuj9+LGW+GwFv0rdBWyb/1gb63u1PxHUpV26+IUe1KsK3zFU1kMnvjUfhf8D2aXnxu16TasAAAAASUVORK5CYII="
 
@@ -322,7 +325,7 @@ func prRelativeTime(_ iso: String) -> String {
     return "\(Int(secs/86400))d ago"
 }
 
-let PR_ROW_H: CGFloat = 60
+let PR_ROW_H: CGFloat = 56
 
 // ─── Icon ────────────────────────────────────────────────────────────────────
 
@@ -365,7 +368,8 @@ class RunRow: NSView {
         let textW = w - textX - rightZone - copyW
 
         let iv = NSImageView(frame: NSRect(x: pad, y: (ROW_H - iconSz) / 2, width: iconSz, height: iconSz))
-        if let img = NSImage(systemSymbolName: sfName(run), accessibilityDescription: nil) {
+        let statusDesc = "\(run.status) \(run.conclusion ?? "")"
+        if let img = NSImage(systemSymbolName: sfName(run), accessibilityDescription: statusDesc) {
             iv.image = img; iv.contentTintColor = sfColor(run)
             iv.symbolConfiguration = .init(pointSize: 14, weight: .semibold)
         }
@@ -398,14 +402,14 @@ class RunRow: NSView {
                 let rem = max(0, est - elapsed)
                 etaText = rem > 0 ? "~\(fmtDuration(rem)) remaining" : "finishing..."
             }
-            let eta = lbl(etaText, .systemFont(ofSize: 10), .tertiaryLabelColor)
+            let eta = lbl(etaText, .systemFont(ofSize: 10), .secondaryLabelColor)
             eta.alignment = .right; eta.frame = NSRect(x: rX, y: 6, width: rW, height: 14)
             addSubview(eta)
         } else {
             let ts = lbl(fmtTimestamp(run.updatedAt), .systemFont(ofSize: 10.5), .secondaryLabelColor)
             ts.alignment = .right; ts.frame = NSRect(x: rX, y: ROW_H - 23, width: rW, height: 14)
             addSubview(ts)
-            let dur = lbl("\u{23F1} \(runDuration(run))", .systemFont(ofSize: 10), .tertiaryLabelColor)
+            let dur = lbl("\(runDuration(run))", .systemFont(ofSize: 10), .secondaryLabelColor)
             dur.alignment = .right; dur.frame = NSRect(x: rX, y: 6, width: rW, height: 14)
             addSubview(dur)
         }
@@ -444,14 +448,26 @@ class RunRow: NSView {
         addTrackingArea(trackingArea!)
     }
     override func mouseEntered(with event: NSEvent) {
-        layer?.backgroundColor = NSColor.selectedContentBackgroundColor.withAlphaComponent(0.15).cgColor
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.15
+            ctx.allowsImplicitAnimation = true
+            layer?.backgroundColor = NSColor.selectedContentBackgroundColor.withAlphaComponent(0.15).cgColor
+        }
     }
-    override func mouseExited(with event: NSEvent) { layer?.backgroundColor = nil }
+    override func mouseExited(with event: NSEvent) {
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.15
+            ctx.allowsImplicitAnimation = true
+            layer?.backgroundColor = nil
+        }
+    }
     override func mouseDown(with event: NSEvent) {
         layer?.backgroundColor = NSColor.selectedContentBackgroundColor.withAlphaComponent(0.25).cgColor
     }
     override func mouseUp(with event: NSEvent) {
-        layer?.backgroundColor = nil
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.15; ctx.allowsImplicitAnimation = true; layer?.backgroundColor = nil
+        }
         let loc = convert(event.locationInWindow, from: nil)
         guard bounds.contains(loc) else { return }
         for sub in subviews where sub is NSButton { if sub.frame.contains(loc) { return } }
@@ -483,7 +499,8 @@ class PRRow: NSView {
 
         // Review status icon
         let iv = NSImageView(frame: NSRect(x: pad, y: (PR_ROW_H - iconSz) / 2, width: iconSz, height: iconSz))
-        if let img = NSImage(systemSymbolName: prReviewIcon(pr), accessibilityDescription: nil) {
+        let reviewDesc = pr.isDraft ? "Draft" : (pr.reviewDecision ?? "Pending review")
+        if let img = NSImage(systemSymbolName: prReviewIcon(pr), accessibilityDescription: reviewDesc) {
             iv.image = img; iv.contentTintColor = prReviewColor(pr)
             iv.symbolConfiguration = .init(pointSize: 14, weight: .semibold)
         }
@@ -516,7 +533,7 @@ class PRRow: NSView {
         diffLabel.frame = NSRect(x: rX, y: PR_ROW_H - 22, width: rightW - 4, height: 14)
         addSubview(diffLabel)
 
-        let timeLabel = lbl(prRelativeTime(pr.updatedAt), .systemFont(ofSize: 10), .tertiaryLabelColor)
+        let timeLabel = lbl(prRelativeTime(pr.updatedAt), .systemFont(ofSize: 10), .secondaryLabelColor)
         timeLabel.alignment = .right
         timeLabel.frame = NSRect(x: rX, y: 6, width: rightW - 4, height: 14)
         addSubview(timeLabel)
@@ -567,16 +584,23 @@ class PRRow: NSView {
         addTrackingArea(trackingArea!)
     }
     override func mouseEntered(with event: NSEvent) {
-        layer?.backgroundColor = NSColor.selectedContentBackgroundColor.withAlphaComponent(0.15).cgColor
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.15; ctx.allowsImplicitAnimation = true
+            layer?.backgroundColor = NSColor.selectedContentBackgroundColor.withAlphaComponent(0.15).cgColor
+        }
     }
     override func mouseExited(with event: NSEvent) {
-        layer?.backgroundColor = nil
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.15; ctx.allowsImplicitAnimation = true; layer?.backgroundColor = nil
+        }
     }
     override func mouseDown(with event: NSEvent) {
         layer?.backgroundColor = NSColor.selectedContentBackgroundColor.withAlphaComponent(0.25).cgColor
     }
     override func mouseUp(with event: NSEvent) {
-        layer?.backgroundColor = nil
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.15; ctx.allowsImplicitAnimation = true; layer?.backgroundColor = nil
+        }
         let loc = convert(event.locationInWindow, from: nil)
         guard bounds.contains(loc) else { return }
         for sub in subviews where sub is NSButton { if sub.frame.contains(loc) { return } }
@@ -756,7 +780,7 @@ class Header: NSView {
         l.font = .systemFont(ofSize: 11, weight: .bold); l.textColor = .secondaryLabelColor
         l.frame = NSRect(x: 12, y: 6, width: w - 130, height: 20)
         addSubview(l)
-        let link = NSTextField(labelWithString: "Open Actions \u{2197}")
+        let link = NSTextField(labelWithString: "Open Actions")
         link.font = .systemFont(ofSize: 10, weight: .medium); link.textColor = .linkColor
         link.frame = NSRect(x: w - 105, y: 8, width: 93, height: 16); link.alignment = .right
         addSubview(link)
@@ -779,11 +803,20 @@ class Clicker: NSView {
 }
 
 class EmptyRow: NSView {
-    init(_ text: String, w: CGFloat) {
-        super.init(frame: NSRect(x: 0, y: 0, width: w, height: 36))
+    init(_ text: String, w: CGFloat, icon: String? = nil) {
+        let h: CGFloat = icon != nil ? 52 : 36
+        super.init(frame: NSRect(x: 0, y: 0, width: w, height: h))
+        if let iconName = icon {
+            let iv = NSImageView(frame: NSRect(x: 16, y: (h - 20) / 2, width: 20, height: 20))
+            if let img = NSImage(systemSymbolName: iconName, accessibilityDescription: nil) {
+                iv.image = img; iv.contentTintColor = .secondaryLabelColor
+                iv.symbolConfiguration = .init(pointSize: 14, weight: .regular)
+            }
+            addSubview(iv)
+        }
         let l = NSTextField(labelWithString: text)
-        l.font = .systemFont(ofSize: 12); l.textColor = .tertiaryLabelColor
-        l.frame = NSRect(x: 42, y: 8, width: w - 54, height: 20)
+        l.font = .systemFont(ofSize: 12); l.textColor = .secondaryLabelColor
+        l.frame = NSRect(x: 42, y: (h - 20) / 2, width: w - 54, height: 20)
         addSubview(l)
     }
     required init?(coder: NSCoder) { fatalError() }
@@ -801,14 +834,14 @@ class Footer: NSView {
         sep.wantsLayer = true; sep.layer?.backgroundColor = NSColor.separatorColor.cgColor
         addSubview(sep)
 
-        let rb = NSButton(title: "\u{21BB} Refresh", target: NSApp.delegate, action: #selector(GHActionsBar.doRefresh))
+        let rb = NSButton(title: "Refresh", target: NSApp.delegate, action: #selector(GHActionsBar.doRefresh))
         rb.bezelStyle = .inline; rb.font = .systemFont(ofSize: 11)
         rb.frame = NSRect(x: 8, y: 8, width: 80, height: 24)
         addSubview(rb)
 
         let f = DateFormatter(); f.dateFormat = "h:mm:ss a"
         let ts = NSTextField(labelWithString: "Updated \(f.string(from: updated))")
-        ts.font = .systemFont(ofSize: 10); ts.textColor = .tertiaryLabelColor; ts.alignment = .center
+        ts.font = .systemFont(ofSize: 10); ts.textColor = .secondaryLabelColor; ts.alignment = .center
         ts.frame = NSRect(x: 90, y: 11, width: w - 230, height: 16)
         addSubview(ts)
 
@@ -888,7 +921,7 @@ class TabVC: NSViewController {
         scrollView.hasVerticalScroller = true; scrollView.drawsBackground = false; scrollView.autohidesScrollers = true
         doc = Flipped(frame: NSRect(x: 0, y: 0, width: w, height: scrollH))
         doc.wantsLayer = true
-        doc.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.65).cgColor
+        doc.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.85).cgColor
         scrollView.documentView = doc
         container.addSubview(scrollView)
 
@@ -913,7 +946,7 @@ class TabVC: NSViewController {
         var rows: [NSView] = []
 
         if REPOS.isEmpty {
-            rows.append(EmptyRow("No repos configured. Open Settings to get started.", w: w))
+            rows.append(EmptyRow("No repos configured. Open Settings to get started.", w: w, icon: "gearshape"))
         } else if selectedTab == 0 {
             rows = buildActionsContent(w)
         } else {
@@ -939,7 +972,7 @@ class TabVC: NSViewController {
         var rows: [NSView] = []
         let data = filteredGrouped()
         if loading && data.isEmpty {
-            rows.append(EmptyRow("Loading actions...", w: w)); return rows
+            rows.append(EmptyRow("Loading actions...", w: w, icon: "arrow.clockwise")); return rows
         }
         for (repo, runs) in data {
             rows.append(Header(repo, w: w))
@@ -955,7 +988,7 @@ class TabVC: NSViewController {
         let data = filteredPRs()
         let hasPRs = data.contains { !$0.1.isEmpty }
         if !hasPRs {
-            rows.append(EmptyRow("No pull requests awaiting your review", w: w))
+            rows.append(EmptyRow("No pull requests awaiting your review", w: w, icon: "checkmark.seal"))
             return rows
         }
         for (repo, prs) in data {
@@ -1032,13 +1065,13 @@ class SettingsVC: NSViewController {
         let w = POP_W
         let container = Flipped(frame: NSRect(x: 0, y: 0, width: w, height: 500))
         container.wantsLayer = true
-        container.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.65).cgColor
+        container.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.85).cgColor
         var y: CGFloat = 0
 
         // ── Nav bar ──
         let nav = NSView(frame: NSRect(x: 0, y: 0, width: w, height: 44))
         nav.wantsLayer = true; nav.layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.9).cgColor
-        let back = NSButton(title: "\u{2190} Back", target: NSApp.delegate, action: #selector(GHActionsBar.showList))
+        let back = NSButton(title: "Back", target: NSApp.delegate, action: #selector(GHActionsBar.showList))
         back.bezelStyle = .inline; back.font = .systemFont(ofSize: 12)
         back.frame = NSRect(x: 8, y: 10, width: 70, height: 24)
         nav.addSubview(back)
@@ -1079,14 +1112,14 @@ class SettingsVC: NSViewController {
 
         // ── Repos section ──
         let repoHdr = sectionHeader("SELECT REPOS TO TRACK", y: y, w: w)
-        let refreshBtn = NSButton(title: "\u{21BB} Refresh", target: self, action: #selector(fetchRepos))
+        let refreshBtn = NSButton(title: "Refresh", target: self, action: #selector(fetchRepos))
         refreshBtn.bezelStyle = .inline; refreshBtn.font = .systemFont(ofSize: 10)
         refreshBtn.frame = NSRect(x: w - 80, y: 6, width: 68, height: 20)
         repoHdr.addSubview(refreshBtn)
         container.addSubview(repoHdr); y += 28
 
         let ll = NSTextField(labelWithString: "Loading repos...")
-        ll.font = .systemFont(ofSize: 11); ll.textColor = .tertiaryLabelColor
+        ll.font = .systemFont(ofSize: 11); ll.textColor = .secondaryLabelColor
         ll.frame = NSRect(x: 16, y: y + 8, width: 200, height: 16)
         container.addSubview(ll)
         loadingLabel = ll
@@ -1164,10 +1197,10 @@ class SettingsVC: NSViewController {
 
     func updateAuthUI() {
         if let user = username {
-            statusLabel?.stringValue = "\u{2705}  Logged in as \(user)"
+            statusLabel?.stringValue = "Logged in as \(user)"
             statusLabel?.textColor = .labelColor
         } else {
-            statusLabel?.stringValue = "\u{274C}  Not authenticated"
+            statusLabel?.stringValue = "Not authenticated"
             statusLabel?.textColor = .systemRed
         }
     }
@@ -1197,7 +1230,7 @@ class SettingsVC: NSViewController {
 
         if allRepos.isEmpty {
             let l = NSTextField(labelWithString: username == nil ? "Login to see your repos" : "No repos found")
-            l.font = .systemFont(ofSize: 12); l.textColor = .tertiaryLabelColor
+            l.font = .systemFont(ofSize: 12); l.textColor = .secondaryLabelColor
             l.frame = NSRect(x: 16, y: 8, width: 300, height: 20)
             doc.addSubview(l)
             y = 36
@@ -1387,10 +1420,11 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
         statusItem.button?.image = tintedIcon(ghIcon, color)
         guard animTimer == nil else { return }
         animPhase = 0
-        animTimer = Timer.scheduledTimer(withTimeInterval: 0.06, repeats: true) { [weak self] _ in
+        animTimer = Timer.scheduledTimer(withTimeInterval: 0.04, repeats: true) { [weak self] _ in
             guard let self = self, let btn = self.statusItem.button else { return }
-            self.animPhase += 0.06
-            btn.alphaValue = CGFloat(0.45 + 0.55 * (0.5 + 0.5 * sin(self.animPhase * 3.0)))
+            self.animPhase += 0.04
+            // Smooth 2-second breathing cycle
+            btn.alphaValue = CGFloat(0.4 + 0.6 * (0.5 + 0.5 * sin(self.animPhase * .pi)))
         }
     }
 
