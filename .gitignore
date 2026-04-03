@@ -1,0 +1,8 @@
+# Build artifacts
+GHActionsBar.app/Contents/MacOS/gh-actions-bar
+gh-actions-bar
+*.o
+*.dSYM/
+
+# macOS
+.DS_Store
