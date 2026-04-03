@@ -6,7 +6,7 @@ The octocat's eye never blinks.
 
 **There are plenty of GitHub status apps out there.** Most are Electron wrappers that eat 200MB+ of RAM to show you a green checkmark. Cat Eye exists because a status indicator shouldn't cost more than the IDE it sits next to.
 
-This is a **native macOS menu bar app** — a single 225KB Swift binary, ~45MB RSS, zero frameworks beyond AppKit. It does one thing: shows you whether your GitHub Actions are passing and your PRs need attention. No dashboard, no analytics, no features you'll never use. Just a colored icon that turns red when something breaks.
+This is a **native macOS menu bar app** — a single 225KB Swift binary, ~31MB RSS, zero frameworks beyond AppKit. It does one thing: shows you whether your GitHub Actions are passing and your PRs need attention. No dashboard, no analytics, no features you'll never use. Just a colored icon that turns red when something breaks.
 
 ## Features
 
@@ -37,7 +37,7 @@ This is a **native macOS menu bar app** — a single 225KB Swift binary, ~45MB R
 - **Hot-reload config** — change tracked repos from settings without restarting
 - **Auto-detects `gh` CLI** — finds your GitHub CLI install automatically
 - **Error feedback** — clear messages when gh CLI is missing, auth fails, or API errors occur
-- **Tiny footprint** — 225KB binary, ~0.3% memory, zero dependencies beyond macOS
+- **Tiny footprint** — 225KB binary, ~31MB memory, zero dependencies beyond macOS
 
 ## Requirements
 
@@ -206,7 +206,7 @@ Prioritizes **deploy** and **smoke test** workflows for overall status, so Depen
 | | Cat Eye | Typical Electron app |
 |---|---|---|
 | **Binary** | 225 KB | 150–300 MB |
-| **Memory** | ~45 MB (0.3%) | 200–400 MB |
+| **Memory** | ~31 MB (0.2%) | 200–400 MB |
 | **CPU at idle** | 0% | 0.5–2% |
 | **Dependencies** | macOS + `gh` CLI | Node.js, Chromium, npm packages |
 | **Startup** | Instant | 2–5 seconds |
@@ -220,7 +220,7 @@ Cat Eye is a single Swift file compiled to a native binary. No runtime, no garba
 | **Process name** | `cat-eye` |
 | **Spotlight name** | Cat Eye |
 | **Binary size** | ~225KB |
-| **Memory** | ~45 MB / 0.3% on 16GB Mac |
+| **Memory** | ~31 MB / 0.2% on 16GB Mac |
 | **Bundle ID** | `com.clintoncodewell.cat-eye` |
 
 ## License
