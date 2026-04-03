@@ -3,8 +3,8 @@ import UserNotifications
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
-struct AppConfig: Decodable {
-    let repos: [String]
+struct AppConfig: Codable {
+    var repos: [String]
     var pollInterval: TimeInterval?
     var pollActiveInterval: TimeInterval?
     var runsPerRepo: Int?
@@ -13,28 +13,46 @@ struct AppConfig: Decodable {
 let CONFIG_DIR  = NSString(string: "~/.config/gh-actions-bar").expandingTildeInPath
 let CONFIG_PATH = (CONFIG_DIR as NSString).appendingPathComponent("config.json")
 
-let config: AppConfig = {
-    if let data = FileManager.default.contents(atPath: CONFIG_PATH),
-       let c = try? JSONDecoder().decode(AppConfig.self, from: data) { return c }
-    // First run — create a sample config
+var REPOS: [String] = []
+var POLL_NORMAL: TimeInterval = 30
+var POLL_ACTIVE: TimeInterval = 10
+var RUNS_PER_REPO: Int = 10
+
+func loadConfig() {
+    guard let data = FileManager.default.contents(atPath: CONFIG_PATH),
+          let c = try? JSONDecoder().decode(AppConfig.self, from: data) else { return }
+    REPOS = c.repos
+    POLL_NORMAL = c.pollInterval ?? 30
+    POLL_ACTIVE = c.pollActiveInterval ?? 10
+    RUNS_PER_REPO = c.runsPerRepo ?? 10
+}
+
+func saveConfig(repos: [String]) {
     try? FileManager.default.createDirectory(atPath: CONFIG_DIR, withIntermediateDirectories: true)
-    let sample = """
-    {
-        "repos": ["owner/repo1", "owner/repo2"],
-        "pollInterval": 30,
-        "pollActiveInterval": 10,
-        "runsPerRepo": 10
+    let c = AppConfig(repos: repos, pollInterval: POLL_NORMAL, pollActiveInterval: POLL_ACTIVE, runsPerRepo: RUNS_PER_REPO)
+    if let data = try? JSONEncoder().encode(c) {
+        let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        if let pretty = try? JSONSerialization.data(withJSONObject: json as Any, options: .prettyPrinted) {
+            try? pretty.write(to: URL(fileURLWithPath: CONFIG_PATH))
+        }
     }
-    """
-    try? sample.write(toFile: CONFIG_PATH, atomically: true, encoding: .utf8)
-    return AppConfig(repos: [])
+    REPOS = repos
+}
+
+// Find gh CLI
+let GH: String = {
+    for p in ["/opt/homebrew/bin/gh", "/usr/local/bin/gh", "/usr/bin/gh"] {
+        if FileManager.default.isExecutableFile(atPath: p) { return p }
+    }
+    let proc = Process(); proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+    proc.arguments = ["which", "gh"]
+    let pipe = Pipe(); proc.standardOutput = pipe; proc.standardError = FileHandle.nullDevice
+    try? proc.run(); proc.waitUntilExit()
+    let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    return out.isEmpty ? "/opt/homebrew/bin/gh" : out
 }()
 
-let REPOS       = config.repos
-let POLL_NORMAL = config.pollInterval ?? 30
-let POLL_ACTIVE = config.pollActiveInterval ?? 10
-let RUNS_PER_REPO = config.runsPerRepo ?? 10
-let GH = "/opt/homebrew/bin/gh"
 let POP_W: CGFloat = 560
 let POP_MAX_H: CGFloat = 700
 let ROW_H: CGFloat = 56
@@ -78,11 +96,47 @@ func ghShell(_ args: String...) -> Data? {
     } catch { return nil }
 }
 
+func ghStr(_ args: String...) -> String? {
+    let proc = Process()
+    proc.executableURL = URL(fileURLWithPath: GH)
+    proc.arguments = Array(args)
+    proc.environment = ProcessInfo.processInfo.environment
+    let pipe = Pipe()
+    proc.standardOutput = pipe
+    proc.standardError = FileHandle.nullDevice
+    do {
+        try proc.run()
+        proc.waitUntilExit()
+        guard proc.terminationStatus == 0 else { return nil }
+        let s = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return s?.isEmpty == false ? s : nil
+    } catch { return nil }
+}
+
 func fetchRuns(repo: String) -> [Run] {
     let fields = "name,displayTitle,status,conclusion,headBranch,event,url,updatedAt,createdAt,startedAt,number,workflowName"
     guard let data = ghShell("run", "list", "--repo", repo, "--limit", "\(RUNS_PER_REPO)", "--json", fields)
     else { return [] }
     return (try? JSONDecoder().decode([Run].self, from: data)) ?? []
+}
+
+func getGHUser() -> String? { ghStr("api", "user", "--jq", ".login") }
+
+func fetchAvailableRepos() -> [String] {
+    guard let out = ghStr("repo", "list", "--limit", "100", "--json", "nameWithOwner", "--jq", ".[].nameWithOwner")
+    else { return [] }
+    var repos = out.split(separator: "\n").map(String.init)
+    // Also fetch org repos
+    if let orgOut = ghStr("api", "user/orgs", "--jq", ".[].login") {
+        for org in orgOut.split(separator: "\n") {
+            if let orgRepos = ghStr("repo", "list", String(org), "--limit", "50",
+                                    "--json", "nameWithOwner", "--jq", ".[].nameWithOwner") {
+                repos.append(contentsOf: orgRepos.split(separator: "\n").map(String.init))
+            }
+        }
+    }
+    return Array(Set(repos)).sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
 }
 
 let isoFmt: ISO8601DateFormatter = {
@@ -214,96 +268,71 @@ class RunRow: NSView {
     required init?(coder: NSCoder) { fatalError() }
 
     func build(_ run: Run, history: [Run], w: CGFloat) {
-        let pad: CGFloat = 12
-        let iconSz: CGFloat = 20
-        let textX = pad + iconSz + 10
-        let copyW: CGFloat = 28
-        let rightZone: CGFloat = 160
+        let pad: CGFloat = 12, iconSz: CGFloat = 20
+        let textX = pad + iconSz + 10, copyW: CGFloat = 28, rightZone: CGFloat = 160
         let textW = w - textX - rightZone - copyW
 
-        // Status icon
         let iv = NSImageView(frame: NSRect(x: pad, y: (ROW_H - iconSz) / 2, width: iconSz, height: iconSz))
         if let img = NSImage(systemSymbolName: sfName(run), accessibilityDescription: nil) {
-            iv.image = img
-            iv.contentTintColor = sfColor(run)
+            iv.image = img; iv.contentTintColor = sfColor(run)
             iv.symbolConfiguration = .init(pointSize: 14, weight: .semibold)
         }
         addSubview(iv)
 
-        // Title
         let title = lbl(String(run.displayTitle.prefix(70)), .systemFont(ofSize: 12.5, weight: .semibold))
         title.frame = NSRect(x: textX, y: ROW_H - 24, width: textW, height: 18)
         title.lineBreakMode = .byTruncatingTail
         addSubview(title)
 
-        // Subtitle
         let wf = run.workflowName ?? run.name
         let sub = lbl("\(wf) #\(run.number) \u{00B7} \(run.event)", .systemFont(ofSize: 11), .secondaryLabelColor)
         sub.frame = NSRect(x: textX, y: 6, width: textW, height: 16)
         sub.lineBreakMode = .byTruncatingTail
         addSubview(sub)
 
-        // Branch badge
         let badge = Badge(String(run.headBranch.prefix(20)))
         badge.frame.origin = NSPoint(x: w - rightZone - copyW, y: ROW_H / 2 + 2)
         addSubview(badge)
 
-        let rX = badge.frame.maxX + 6
-        let rW = w - rX - copyW - 4
+        let rX = badge.frame.maxX + 6, rW = w - rX - copyW - 4
 
         if run.status == "in_progress" || run.status == "queued" {
             let elapsed = runElapsed(run)
             let el = lbl("\(fmtDuration(elapsed)) elapsed", .monospacedDigitSystemFont(ofSize: 10.5, weight: .medium), .systemOrange)
-            el.alignment = .right
-            el.frame = NSRect(x: rX, y: ROW_H - 23, width: rW, height: 14)
+            el.alignment = .right; el.frame = NSRect(x: rX, y: ROW_H - 23, width: rW, height: 14)
             addSubview(el)
-
             var etaText = "estimating..."
             if let est = estimatedTotal(for: run, history: history) {
                 let rem = max(0, est - elapsed)
                 etaText = rem > 0 ? "~\(fmtDuration(rem)) remaining" : "finishing..."
             }
             let eta = lbl(etaText, .systemFont(ofSize: 10), .tertiaryLabelColor)
-            eta.alignment = .right
-            eta.frame = NSRect(x: rX, y: 6, width: rW, height: 14)
+            eta.alignment = .right; eta.frame = NSRect(x: rX, y: 6, width: rW, height: 14)
             addSubview(eta)
         } else {
             let ts = lbl(fmtTimestamp(run.updatedAt), .systemFont(ofSize: 10.5), .secondaryLabelColor)
-            ts.alignment = .right
-            ts.frame = NSRect(x: rX, y: ROW_H - 23, width: rW, height: 14)
+            ts.alignment = .right; ts.frame = NSRect(x: rX, y: ROW_H - 23, width: rW, height: 14)
             addSubview(ts)
-
             let dur = lbl("\u{23F1} \(runDuration(run))", .systemFont(ofSize: 10), .tertiaryLabelColor)
-            dur.alignment = .right
-            dur.frame = NSRect(x: rX, y: 6, width: rW, height: 14)
+            dur.alignment = .right; dur.frame = NSRect(x: rX, y: 6, width: rW, height: 14)
             addSubview(dur)
         }
 
-        // Copy URL button
         let cp = NSButton(frame: NSRect(x: w - copyW - 4, y: (ROW_H - 24) / 2, width: copyW, height: 24))
-        if let img = NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: "Copy URL") {
-            cp.image = img
-        }
-        cp.bezelStyle = .recessed
-        cp.isBordered = false
-        cp.imagePosition = .imageOnly
-        cp.target = self
-        cp.action = #selector(copyURL(_:))
-        cp.toolTip = "Copy run URL"
+        if let img = NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: "Copy URL") { cp.image = img }
+        cp.bezelStyle = .recessed; cp.isBordered = false; cp.imagePosition = .imageOnly
+        cp.target = self; cp.action = #selector(copyURL(_:)); cp.toolTip = "Copy run URL"
         addSubview(cp)
 
-        // Separator
         let sep = NSView(frame: NSRect(x: textX, y: 0, width: w - textX - pad, height: 0.5))
-        sep.wantsLayer = true
-        sep.layer?.backgroundColor = NSColor.separatorColor.cgColor
+        sep.wantsLayer = true; sep.layer?.backgroundColor = NSColor.separatorColor.cgColor
         addSubview(sep)
     }
 
     func lbl(_ text: String, _ font: NSFont, _ color: NSColor = .labelColor) -> NSTextField {
         let l = NSTextField(labelWithString: text)
         l.font = font; l.textColor = color; l.maximumNumberOfLines = 1
-        l.cell?.truncatesLastVisibleLine = true
-        return l
+        l.cell?.truncatesLastVisibleLine = true; return l
     }
 
     @objc func copyURL(_ sender: Any?) {
@@ -311,11 +340,8 @@ class RunRow: NSView {
         NSPasteboard.general.setString(urlStr, forType: .string)
         if let btn = sender as? NSButton,
            let img = NSImage(systemSymbolName: "checkmark", accessibilityDescription: nil) {
-            let orig = btn.image
-            btn.image = img; btn.contentTintColor = .systemGreen
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                btn.image = orig; btn.contentTintColor = nil
-            }
+            let orig = btn.image; btn.image = img; btn.contentTintColor = .systemGreen
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { btn.image = orig; btn.contentTintColor = nil }
         }
     }
 
@@ -328,9 +354,7 @@ class RunRow: NSView {
     override func mouseEntered(with event: NSEvent) {
         layer?.backgroundColor = NSColor.selectedContentBackgroundColor.withAlphaComponent(0.15).cgColor
     }
-    override func mouseExited(with event: NSEvent) {
-        layer?.backgroundColor = nil
-    }
+    override func mouseExited(with event: NSEvent) { layer?.backgroundColor = nil }
     override func mouseDown(with event: NSEvent) {
         layer?.backgroundColor = NSColor.selectedContentBackgroundColor.withAlphaComponent(0.25).cgColor
     }
@@ -343,7 +367,7 @@ class RunRow: NSView {
     }
 }
 
-// ─── Branch Badge ────────────────────────────────────────────────────────────
+// ─── Shared Views ────────────────────────────────────────────────────────────
 
 class Badge: NSView {
     let text: String
@@ -368,13 +392,10 @@ class Badge: NSView {
     }
 }
 
-// ─── Section Header ──────────────────────────────────────────────────────────
-
 class Header: NSView {
     init(_ repo: String, w: CGFloat) {
         super.init(frame: NSRect(x: 0, y: 0, width: w, height: HDR_H))
-        wantsLayer = true
-        layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.9).cgColor
+        wantsLayer = true; layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.9).cgColor
         let short = repo.components(separatedBy: "/").last ?? repo
         let l = NSTextField(labelWithString: short.uppercased())
         l.font = .systemFont(ofSize: 11, weight: .bold); l.textColor = .secondaryLabelColor
@@ -402,8 +423,6 @@ class Clicker: NSView {
     override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
 }
 
-// ─── Empty / Loading ─────────────────────────────────────────────────────────
-
 class EmptyRow: NSView {
     init(_ text: String, w: CGFloat) {
         super.init(frame: NSRect(x: 0, y: 0, width: w, height: 36))
@@ -415,25 +434,37 @@ class EmptyRow: NSView {
     required init?(coder: NSCoder) { fatalError() }
 }
 
+class Flipped: NSView { override var isFlipped: Bool { true } }
+
 // ─── Footer ──────────────────────────────────────────────────────────────────
 
 class Footer: NSView {
     init(_ w: CGFloat, updated: Date) {
         super.init(frame: NSRect(x: 0, y: 0, width: w, height: FTR_H))
-        wantsLayer = true
-        layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.9).cgColor
+        wantsLayer = true; layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.9).cgColor
         let sep = NSView(frame: NSRect(x: 0, y: FTR_H - 0.5, width: w, height: 0.5))
         sep.wantsLayer = true; sep.layer?.backgroundColor = NSColor.separatorColor.cgColor
         addSubview(sep)
+
         let rb = NSButton(title: "\u{21BB} Refresh", target: NSApp.delegate, action: #selector(GHActionsBar.doRefresh))
         rb.bezelStyle = .inline; rb.font = .systemFont(ofSize: 11)
         rb.frame = NSRect(x: 8, y: 8, width: 80, height: 24)
         addSubview(rb)
+
         let f = DateFormatter(); f.dateFormat = "h:mm:ss a"
         let ts = NSTextField(labelWithString: "Updated \(f.string(from: updated))")
         ts.font = .systemFont(ofSize: 10); ts.textColor = .tertiaryLabelColor; ts.alignment = .center
-        ts.frame = NSRect(x: 90, y: 11, width: w - 180, height: 16)
+        ts.frame = NSRect(x: 90, y: 11, width: w - 230, height: 16)
         addSubview(ts)
+
+        // Settings gear
+        let gear = NSButton(frame: NSRect(x: w - 100, y: 8, width: 36, height: 24))
+        if let img = NSImage(systemSymbolName: "gearshape", accessibilityDescription: "Settings") { gear.image = img }
+        gear.bezelStyle = .inline; gear.imagePosition = .imageOnly
+        gear.target = NSApp.delegate; gear.action = #selector(GHActionsBar.showSettings)
+        gear.toolTip = "Settings"
+        addSubview(gear)
+
         let qb = NSButton(title: "Quit", target: NSApp.delegate, action: #selector(GHActionsBar.quitApp))
         qb.bezelStyle = .inline; qb.font = .systemFont(ofSize: 11)
         qb.frame = NSRect(x: w - 56, y: 8, width: 48, height: 24)
@@ -442,11 +473,7 @@ class Footer: NSView {
     required init?(coder: NSCoder) { fatalError() }
 }
 
-// ─── Flipped View ────────────────────────────────────────────────────────────
-
-class Flipped: NSView { override var isFlipped: Bool { true } }
-
-// ─── Popover Content ─────────────────────────────────────────────────────────
+// ─── List View ───────────────────────────────────────────────────────────────
 
 class ListVC: NSViewController {
     let grouped: [(String, [Run])]
@@ -464,20 +491,14 @@ class ListVC: NSViewController {
         var rows: [NSView] = []
 
         if REPOS.isEmpty {
-            rows.append(EmptyRow("No repos configured.", w: w))
-            rows.append(EmptyRow("Edit ~/.config/gh-actions-bar/config.json", w: w))
+            rows.append(EmptyRow("No repos configured. Open Settings to get started.", w: w))
         } else if loading && grouped.isEmpty {
             rows.append(EmptyRow("Loading actions...", w: w))
         } else {
             for (repo, runs) in grouped {
                 rows.append(Header(repo, w: w))
-                if runs.isEmpty {
-                    rows.append(EmptyRow("No recent runs", w: w))
-                } else {
-                    for run in runs {
-                        rows.append(RunRow(run, history: runs, w: w))
-                    }
-                }
+                if runs.isEmpty { rows.append(EmptyRow("No recent runs", w: w)) }
+                else { for run in runs { rows.append(RunRow(run, history: runs, w: w)) } }
             }
         }
         rows.append(Footer(w, updated: updated))
@@ -491,12 +512,263 @@ class ListVC: NSViewController {
 
         let visH = min(totalH, POP_MAX_H)
         let sv = NSScrollView(frame: NSRect(x: 0, y: 0, width: w, height: visH))
-        sv.hasVerticalScroller = true
-        sv.drawsBackground = false
-        sv.documentView = doc
-        sv.autohidesScrollers = true
+        sv.hasVerticalScroller = true; sv.drawsBackground = false
+        sv.documentView = doc; sv.autohidesScrollers = true
         self.view = sv
         self.preferredContentSize = NSSize(width: w, height: visH)
+    }
+}
+
+// ─── Settings View ───────────────────────────────────────────────────────────
+
+class SettingsVC: NSViewController {
+    var selected: Set<String>
+    var available: [String] = []
+    var username: String?
+    var checkboxes: [NSButton] = []
+    var repoScroll: NSScrollView?
+    var repoDoc: Flipped?
+    var statusLabel: NSTextField?
+    var addField: NSTextField?
+    var loadingLabel: NSTextField?
+
+    init(current: Set<String>) {
+        self.selected = current
+        super.init(nibName: nil, bundle: nil)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func loadView() {
+        let w = POP_W
+        let container = Flipped(frame: NSRect(x: 0, y: 0, width: w, height: 500))
+        container.wantsLayer = true
+        container.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.65).cgColor
+        var y: CGFloat = 0
+
+        // ── Nav bar ──
+        let nav = NSView(frame: NSRect(x: 0, y: 0, width: w, height: 44))
+        nav.wantsLayer = true; nav.layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.9).cgColor
+        let back = NSButton(title: "\u{2190} Back", target: NSApp.delegate, action: #selector(GHActionsBar.showList))
+        back.bezelStyle = .inline; back.font = .systemFont(ofSize: 12)
+        back.frame = NSRect(x: 8, y: 10, width: 70, height: 24)
+        nav.addSubview(back)
+        let tl = NSTextField(labelWithString: "SETTINGS")
+        tl.font = .systemFont(ofSize: 13, weight: .bold); tl.textColor = .labelColor; tl.alignment = .center
+        tl.frame = NSRect(x: 80, y: 12, width: w - 160, height: 20)
+        nav.addSubview(tl)
+        container.addSubview(nav); y += 44
+
+        // ── Separator ──
+        let s1 = sepLine(y: y, w: w); container.addSubview(s1); y += 0.5
+
+        // ── Account section ──
+        let accHdr = sectionHeader("GITHUB ACCOUNT", y: y, w: w)
+        container.addSubview(accHdr); y += 28
+
+        let accRow = NSView(frame: NSRect(x: 0, y: y, width: w, height: 40))
+        let sl = NSTextField(labelWithString: "Checking...")
+        sl.font = .systemFont(ofSize: 12); sl.textColor = .secondaryLabelColor
+        sl.frame = NSRect(x: 16, y: 10, width: w - 180, height: 20)
+        accRow.addSubview(sl)
+        statusLabel = sl
+
+        let loginBtn = NSButton(title: "Login...", target: self, action: #selector(doLogin))
+        loginBtn.bezelStyle = .inline; loginBtn.font = .systemFont(ofSize: 11)
+        loginBtn.frame = NSRect(x: w - 160, y: 10, width: 64, height: 24)
+        loginBtn.tag = 1
+        accRow.addSubview(loginBtn)
+
+        let logoutBtn = NSButton(title: "Logout", target: self, action: #selector(doLogout))
+        logoutBtn.bezelStyle = .inline; logoutBtn.font = .systemFont(ofSize: 11)
+        logoutBtn.frame = NSRect(x: w - 88, y: 10, width: 64, height: 24)
+        logoutBtn.tag = 2
+        accRow.addSubview(logoutBtn)
+
+        container.addSubview(accRow); y += 40
+        let s2 = sepLine(y: y, w: w); container.addSubview(s2); y += 0.5
+
+        // ── Repos section ──
+        let repoHdr = sectionHeader("SELECT REPOS TO TRACK", y: y, w: w)
+        let refreshBtn = NSButton(title: "\u{21BB} Refresh", target: self, action: #selector(fetchRepos))
+        refreshBtn.bezelStyle = .inline; refreshBtn.font = .systemFont(ofSize: 10)
+        refreshBtn.frame = NSRect(x: w - 80, y: 6, width: 68, height: 20)
+        repoHdr.addSubview(refreshBtn)
+        container.addSubview(repoHdr); y += 28
+
+        let ll = NSTextField(labelWithString: "Loading repos...")
+        ll.font = .systemFont(ofSize: 11); ll.textColor = .tertiaryLabelColor
+        ll.frame = NSRect(x: 16, y: y + 8, width: 200, height: 16)
+        container.addSubview(ll)
+        loadingLabel = ll
+
+        let scrollH: CGFloat = 260
+        let rd = Flipped(frame: NSRect(x: 0, y: 0, width: w, height: scrollH))
+        let rs = NSScrollView(frame: NSRect(x: 0, y: y, width: w, height: scrollH))
+        rs.hasVerticalScroller = true; rs.drawsBackground = false
+        rs.documentView = rd; rs.autohidesScrollers = true
+        container.addSubview(rs)
+        repoScroll = rs; repoDoc = rd
+        y += scrollH
+
+        let s3 = sepLine(y: y, w: w); container.addSubview(s3); y += 0.5
+
+        // ── Add repo manually ──
+        let addHdr = sectionHeader("ADD REPO MANUALLY", y: y, w: w)
+        container.addSubview(addHdr); y += 28
+
+        let addRow = NSView(frame: NSRect(x: 0, y: y, width: w, height: 36))
+        let tf = NSTextField(frame: NSRect(x: 16, y: 6, width: w - 110, height: 24))
+        tf.placeholderString = "owner/repo"
+        tf.font = .systemFont(ofSize: 12)
+        addRow.addSubview(tf)
+        addField = tf
+        let addBtn = NSButton(title: "Add", target: self, action: #selector(addManualRepo))
+        addBtn.bezelStyle = .inline; addBtn.font = .systemFont(ofSize: 11)
+        addBtn.frame = NSRect(x: w - 80, y: 6, width: 56, height: 24)
+        addRow.addSubview(addBtn)
+        container.addSubview(addRow); y += 36
+
+        let s4 = sepLine(y: y, w: w); container.addSubview(s4); y += 0.5
+
+        // ── Save button ──
+        let saveRow = NSView(frame: NSRect(x: 0, y: y, width: w, height: 48))
+        saveRow.wantsLayer = true; saveRow.layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.9).cgColor
+        let saveBtn = NSButton(title: "Save & Apply", target: self, action: #selector(doSave))
+        saveBtn.bezelStyle = .inline; saveBtn.font = .systemFont(ofSize: 12, weight: .semibold)
+        saveBtn.frame = NSRect(x: w / 2 - 60, y: 12, width: 120, height: 28)
+        saveRow.addSubview(saveBtn)
+        container.addSubview(saveRow); y += 48
+
+        container.frame.size.height = y
+        self.view = container
+        self.preferredContentSize = NSSize(width: w, height: min(y, POP_MAX_H))
+
+        // Load data in background
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let user = getGHUser()
+            let repos = fetchAvailableRepos()
+            DispatchQueue.main.async {
+                self?.username = user
+                self?.available = repos
+                self?.updateAuthUI()
+                self?.rebuildRepoList()
+            }
+        }
+    }
+
+    func sectionHeader(_ title: String, y: CGFloat, w: CGFloat) -> NSView {
+        let v = NSView(frame: NSRect(x: 0, y: y, width: w, height: 28))
+        v.wantsLayer = true; v.layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.7).cgColor
+        let l = NSTextField(labelWithString: title)
+        l.font = .systemFont(ofSize: 10, weight: .bold); l.textColor = .secondaryLabelColor
+        l.frame = NSRect(x: 16, y: 6, width: w - 100, height: 16)
+        v.addSubview(l)
+        return v
+    }
+
+    func sepLine(y: CGFloat, w: CGFloat) -> NSView {
+        let v = NSView(frame: NSRect(x: 0, y: y, width: w, height: 0.5))
+        v.wantsLayer = true; v.layer?.backgroundColor = NSColor.separatorColor.cgColor
+        return v
+    }
+
+    func updateAuthUI() {
+        if let user = username {
+            statusLabel?.stringValue = "\u{2705}  Logged in as \(user)"
+            statusLabel?.textColor = .labelColor
+        } else {
+            statusLabel?.stringValue = "\u{274C}  Not authenticated"
+            statusLabel?.textColor = .systemRed
+        }
+    }
+
+    func rebuildRepoList() {
+        guard let doc = repoDoc else { return }
+        loadingLabel?.isHidden = true
+        doc.subviews.forEach { $0.removeFromSuperview() }
+        checkboxes = []
+
+        // Merge available repos with currently selected (in case some aren't in the fetched list)
+        var allRepos = available
+        for r in selected { if !allRepos.contains(r) { allRepos.append(r) } }
+
+        let rowH: CGFloat = 26
+        var y: CGFloat = 4
+        for repo in allRepos {
+            let cb = NSButton(checkboxWithTitle: "  \(repo)", target: self, action: #selector(toggleRepo(_:)))
+            cb.font = .systemFont(ofSize: 12)
+            cb.state = selected.contains(repo) ? .on : .off
+            cb.frame = NSRect(x: 12, y: y, width: POP_W - 24, height: rowH)
+            cb.identifier = NSUserInterfaceItemIdentifier(repo)
+            doc.addSubview(cb)
+            checkboxes.append(cb)
+            y += rowH
+        }
+
+        if allRepos.isEmpty {
+            let l = NSTextField(labelWithString: username == nil ? "Login to see your repos" : "No repos found")
+            l.font = .systemFont(ofSize: 12); l.textColor = .tertiaryLabelColor
+            l.frame = NSRect(x: 16, y: 8, width: 300, height: 20)
+            doc.addSubview(l)
+            y = 36
+        }
+
+        doc.frame.size.height = max(y + 4, repoScroll?.frame.height ?? 260)
+    }
+
+    @objc func toggleRepo(_ sender: NSButton) {
+        guard let repo = sender.identifier?.rawValue else { return }
+        if sender.state == .on { selected.insert(repo) } else { selected.remove(repo) }
+    }
+
+    @objc func addManualRepo() {
+        guard let text = addField?.stringValue.trimmingCharacters(in: .whitespaces),
+              !text.isEmpty, text.contains("/") else { return }
+        selected.insert(text)
+        if !available.contains(text) { available.append(text) }
+        addField?.stringValue = ""
+        rebuildRepoList()
+    }
+
+    @objc func fetchRepos() {
+        loadingLabel?.isHidden = false
+        loadingLabel?.stringValue = "Refreshing..."
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let user = getGHUser()
+            let repos = fetchAvailableRepos()
+            DispatchQueue.main.async {
+                self?.username = user
+                self?.available = repos
+                self?.updateAuthUI()
+                self?.rebuildRepoList()
+            }
+        }
+    }
+
+    @objc func doLogin() {
+        let script = "tell application \"Terminal\" to do script \"gh auth login --web -p https\""
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        proc.arguments = ["-e", script]
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError = FileHandle.nullDevice
+        try? proc.run()
+    }
+
+    @objc func doLogout() {
+        let script = "tell application \"Terminal\" to do script \"gh auth logout\""
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        proc.arguments = ["-e", script]
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError = FileHandle.nullDevice
+        try? proc.run()
+    }
+
+    @objc func doSave() {
+        let repos = Array(selected).sorted()
+        saveConfig(repos: repos)
+        (NSApp.delegate as? GHActionsBar)?.onConfigSaved()
     }
 }
 
@@ -513,12 +785,12 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
     var closeTime = Date.distantPast
     var firstLoad = true
     var ghIcon: NSImage?
-    var prevStatuses: [String: String] = [:]  // run url -> status
+    var prevStatuses: [String: String] = [:]
 
     func applicationDidFinishLaunching(_ note: Notification) {
+        loadConfig()
         ghIcon = loadGHIcon()
 
-        // Request notification permission
         let nc = UNUserNotificationCenter.current()
         nc.delegate = self
         nc.requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
@@ -536,7 +808,16 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
         popover.animates = true
         popover.delegate = self
 
-        refresh()
+        if REPOS.isEmpty {
+            // First run: open popover with settings
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                self.closeTime = .distantPast
+                self.showSettings()
+                self.toggle()
+            }
+        } else {
+            refresh()
+        }
         scheduleTimer()
     }
 
@@ -544,6 +825,7 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
 
     func scheduleTimer() {
         timer?.invalidate()
+        guard !REPOS.isEmpty else { return }
         let interval = hasActive(grouped) ? POLL_ACTIVE : POLL_NORMAL
         timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             self?.refresh()
@@ -551,6 +833,7 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
     }
 
     func refresh(completion: (() -> Void)? = nil) {
+        guard !REPOS.isEmpty else { completion?(); return }
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self = self else { return }
             var res = Array(repeating: (String, [Run])("", []), count: REPOS.count)
@@ -575,15 +858,25 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
         }
     }
 
-    // MARK: - Icon (tint + animation)
+    func onConfigSaved() {
+        prevStatuses = [:]
+        firstLoad = true
+        grouped = []
+        popover.close()
+        refresh { [weak self] in
+            guard let self = self else { return }
+            self.closeTime = .distantPast
+            self.toggle()
+        }
+    }
+
+    // MARK: - Icon
 
     func updateIcon() {
         let color = overallColor(grouped)
         let active = hasActive(grouped)
-
-        if active {
-            startAnimation(color)
-        } else {
+        if active { startAnimation(color) }
+        else {
             stopAnimation()
             statusItem.button?.image = tintedIcon(ghIcon, color)
             statusItem.button?.alphaValue = 1.0
@@ -591,85 +884,53 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
     }
 
     func startAnimation(_ color: NSColor) {
-        // Set base icon color
         statusItem.button?.image = tintedIcon(ghIcon, color)
         guard animTimer == nil else { return }
         animPhase = 0
         animTimer = Timer.scheduledTimer(withTimeInterval: 0.06, repeats: true) { [weak self] _ in
             guard let self = self, let btn = self.statusItem.button else { return }
             self.animPhase += 0.06
-            let alpha = 0.45 + 0.55 * (0.5 + 0.5 * sin(self.animPhase * 3.0))
-            btn.alphaValue = CGFloat(alpha)
+            btn.alphaValue = CGFloat(0.45 + 0.55 * (0.5 + 0.5 * sin(self.animPhase * 3.0)))
         }
     }
 
-    func stopAnimation() {
-        animTimer?.invalidate()
-        animTimer = nil
-    }
+    func stopAnimation() { animTimer?.invalidate(); animTimer = nil }
 
     // MARK: - Notifications
 
     func detectTransitions(_ newGrouped: [(String, [Run])]) {
         guard !firstLoad else {
-            // First load: just record state, don't notify
-            for run in newGrouped.flatMap({ $0.1 }) {
-                prevStatuses[run.url] = run.status
-            }
+            for run in newGrouped.flatMap({ $0.1 }) { prevStatuses[run.url] = run.status }
             return
         }
-
         let newRuns = newGrouped.flatMap { $0.1 }
         for run in newRuns {
             let old = prevStatuses[run.url]
             let wf = run.workflowName ?? run.name
-
-            // Started: wasn't in_progress before, now is
             if run.status == "in_progress" && old != "in_progress" {
-                notify(
-                    title: "\u{25B6}\u{FE0F} Action Started",
-                    body: "\(wf) on \(run.headBranch)",
-                    id: "start-\(run.url)"
-                )
+                notify(title: "\u{25B6}\u{FE0F} Action Started", body: "\(wf) on \(run.headBranch)", id: "start-\(run.url)")
             }
-
-            // Completed: was in_progress or queued, now completed
             if run.status == "completed" && (old == "in_progress" || old == "queued") {
                 let ok = run.conclusion == "success"
-                notify(
-                    title: ok ? "\u{2705} Action Passed" : "\u{274C} Action Failed",
-                    body: "\(wf) on \(run.headBranch) \u{2014} \(runDuration(run))",
-                    id: "end-\(run.url)"
-                )
+                notify(title: ok ? "\u{2705} Action Passed" : "\u{274C} Action Failed",
+                       body: "\(wf) on \(run.headBranch) \u{2014} \(runDuration(run))", id: "end-\(run.url)")
             }
         }
-
-        // Rebuild state
-        prevStatuses = [:]
-        for run in newRuns { prevStatuses[run.url] = run.status }
+        prevStatuses = [:]; for run in newRuns { prevStatuses[run.url] = run.status }
     }
 
     func notify(title: String, body: String, id: String) {
-        let content = UNMutableNotificationContent()
-        content.title = title
-        content.body = body
-        content.sound = .default
-        let req = UNNotificationRequest(identifier: id, content: content, trigger: nil)
-        UNUserNotificationCenter.current().add(req)
+        let c = UNMutableNotificationContent(); c.title = title; c.body = body; c.sound = .default
+        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: id, content: c, trigger: nil))
     }
 
-    // Notification clicked → open popover
     func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 didReceive response: UNNotificationResponse,
                                 withCompletionHandler handler: @escaping () -> Void) {
-        DispatchQueue.main.async {
-            self.closeTime = .distantPast
-            self.toggle()
-        }
+        DispatchQueue.main.async { self.closeTime = .distantPast; self.toggle() }
         handler()
     }
 
-    // Show notifications even when app is frontmost
     func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 willPresent notification: UNNotification,
                                 withCompletionHandler handler: @escaping (UNNotificationPresentationOptions) -> Void) {
@@ -679,13 +940,26 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
     // MARK: - Popover
 
     @objc func toggle() {
-        if popover.isShown {
-            popover.close()
-        } else if Date().timeIntervalSince(closeTime) > 0.3 {
-            popover.contentViewController = ListVC(grouped, updated: lastUpdate, loading: firstLoad)
+        if popover.isShown { popover.close() }
+        else if Date().timeIntervalSince(closeTime) > 0.3 {
+            if popover.contentViewController == nil || popover.contentViewController is ListVC {
+                popover.contentViewController = ListVC(grouped, updated: lastUpdate, loading: firstLoad)
+            }
             NSApp.activate(ignoringOtherApps: true)
             popover.show(relativeTo: statusItem.button!.bounds, of: statusItem.button!, preferredEdge: .minY)
         }
+    }
+
+    @objc func showSettings() {
+        popover.contentViewController = SettingsVC(current: Set(REPOS))
+        if !popover.isShown {
+            closeTime = .distantPast
+            toggle()
+        }
+    }
+
+    @objc func showList() {
+        popover.contentViewController = ListVC(grouped, updated: lastUpdate, loading: firstLoad)
     }
 
     @objc func doRefresh() {
@@ -699,7 +973,10 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
 
     @objc func quitApp() { NSApp.terminate(nil) }
 
-    func popoverDidClose(_ notification: Notification) { closeTime = Date() }
+    func popoverDidClose(_ notification: Notification) {
+        closeTime = Date()
+        popover.contentViewController = nil  // Release settings view if open
+    }
 }
 
 // ─── Main ────────────────────────────────────────────────────────────────────
