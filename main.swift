@@ -10,7 +10,7 @@ struct AppConfig: Codable {
     var runsPerRepo: Int?
 }
 
-let CONFIG_DIR  = NSString(string: "~/.config/gh-actions-bar").expandingTildeInPath
+let CONFIG_DIR  = NSString(string: "~/.config/cat-eye").expandingTildeInPath
 let CONFIG_PATH = (CONFIG_DIR as NSString).appendingPathComponent("config.json")
 
 var REPOS: [String] = []

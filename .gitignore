@@ -1,6 +1,6 @@
 # Build artifacts
-GHActionsBar.app/Contents/MacOS/gh-actions-bar
-gh-actions-bar
+CatEye.app/Contents/MacOS/cat-eye
+cat-eye
 *.o
 *.dSYM/
 

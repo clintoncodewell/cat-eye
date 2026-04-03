@@ -3,11 +3,11 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key>
-    <string>com.clintoncodewell.gh-actions-bar</string>
+    <string>com.clintoncodewell.cat-eye</string>
     <key>CFBundleName</key>
-    <string>GH Actions Bar</string>
+    <string>Cat's Eye</string>
     <key>CFBundleExecutable</key>
-    <string>gh-actions-bar</string>
+    <string>cat-eye</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleVersion</key>
