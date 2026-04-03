@@ -233,9 +233,13 @@ func parseISO(_ s: String?) -> Date? {
     return isoFmtFrac.date(from: s) ?? isoFmt.date(from: s)
 }
 
+let timestampFmt: DateFormatter = {
+    let f = DateFormatter(); f.dateFormat = "MMM d, h:mm a"; return f
+}()
+
 func fmtTimestamp(_ iso: String) -> String {
     guard let d = parseISO(iso) else { return "" }
-    let f = DateFormatter(); f.dateFormat = "MMM d, h:mm a"; return f.string(from: d)
+    return timestampFmt.string(from: d)
 }
 
 func fmtDuration(_ secs: TimeInterval) -> String {
@@ -1515,10 +1519,10 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
         statusItem.button?.image = tintedIcon(ghIcon, color)
         guard animTimer == nil else { return }
         animPhase = 0
-        animTimer = Timer.scheduledTimer(withTimeInterval: 0.04, repeats: true) { [weak self] _ in
+        animTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { [weak self] _ in
             guard let self = self, let btn = self.statusItem.button else { return }
-            self.animPhase += 0.04
-            // Smooth 2-second breathing cycle
+            self.animPhase += 0.15
+            // Smooth 2-second breathing cycle (~7fps, sufficient for 18px icon)
             btn.alphaValue = CGFloat(0.4 + 0.6 * (0.5 + 0.5 * sin(self.animPhase * .pi)))
         }
     }
