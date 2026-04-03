@@ -8,6 +8,10 @@ The octocat's eye never blinks.
 
 This is a **native macOS menu bar app** — a single 225KB Swift binary, ~31MB RSS, zero frameworks beyond AppKit. It does one thing: shows you whether your GitHub Actions are passing and your PRs need attention. No dashboard, no analytics, no features you'll never use. Just a colored icon that turns red when something breaks.
 
+| Actions tab | Pull Requests tab |
+|:-----------:|:-----------------:|
+| ![Actions](screenshots/actions.png) | ![Pull Requests](screenshots/prs.png) |
+
 ## Features
 
 ### Actions Tab
