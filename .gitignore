@@ -3,7 +3,19 @@ CatEye.app/Contents/MacOS/cat-eye
 cat-eye
 *.o
 *.dSYM/
+CatEye.zip
 
 # macOS
 .DS_Store
-CatEye.zip
+
+# Secrets / credentials
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.p8
+*.cer
+*.mobileprovision
+credentials.json
+secrets.json

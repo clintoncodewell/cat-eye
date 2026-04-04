@@ -18,10 +18,16 @@ var POLL_NORMAL: TimeInterval = 30
 var POLL_ACTIVE: TimeInterval = 10
 var RUNS_PER_REPO: Int = 10
 
+let repoPattern = try! NSRegularExpression(pattern: "^[a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+$")
+
+func isValidRepo(_ s: String) -> Bool {
+    repoPattern.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)) != nil
+}
+
 func loadConfig() {
     guard let data = FileManager.default.contents(atPath: CONFIG_PATH),
           let c = try? JSONDecoder().decode(AppConfig.self, from: data) else { return }
-    REPOS = c.repos
+    REPOS = c.repos.filter { isValidRepo($0) }
     POLL_NORMAL = c.pollInterval ?? 30
     POLL_ACTIVE = c.pollActiveInterval ?? 10
     RUNS_PER_REPO = c.runsPerRepo ?? 10
@@ -29,7 +35,7 @@ func loadConfig() {
 
 func saveConfig(repos: [String]) {
     try? FileManager.default.createDirectory(atPath: CONFIG_DIR, withIntermediateDirectories: true)
-    let c = AppConfig(repos: repos, pollInterval: POLL_NORMAL, pollActiveInterval: POLL_ACTIVE, runsPerRepo: RUNS_PER_REPO)
+    let c = AppConfig(repos: repos.filter { isValidRepo($0) }, pollInterval: POLL_NORMAL, pollActiveInterval: POLL_ACTIVE, runsPerRepo: RUNS_PER_REPO)
     if let data = try? JSONEncoder().encode(c) {
         let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         if let pretty = try? JSONSerialization.data(withJSONObject: json as Any, options: .prettyPrinted) {
@@ -39,18 +45,27 @@ func saveConfig(repos: [String]) {
     REPOS = repos
 }
 
-// Find gh CLI
+// Find gh CLI — hardcoded trusted paths only
 let GH: String = {
-    for p in ["/opt/homebrew/bin/gh", "/usr/local/bin/gh", "/usr/bin/gh"] {
+    let trusted = ["/opt/homebrew/bin/gh", "/usr/local/bin/gh", "/usr/bin/gh"]
+    for p in trusted {
         if FileManager.default.isExecutableFile(atPath: p) { return p }
     }
-    let proc = Process(); proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-    proc.arguments = ["which", "gh"]
-    let pipe = Pipe(); proc.standardOutput = pipe; proc.standardError = FileHandle.nullDevice
-    try? proc.run(); proc.waitUntilExit()
-    let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
-        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-    return out.isEmpty ? "/opt/homebrew/bin/gh" : out
+    return trusted[0] // Will show "gh not found" error on first fetch
+}()
+
+// Minimal env for gh CLI — PATH, HOME, LANG + gh auth/config vars
+let ghEnv: [String: String] = {
+    let env = ProcessInfo.processInfo.environment
+    let allow = ["PATH", "HOME", "LANG", "SHELL",
+                 "GH_TOKEN", "GITHUB_TOKEN", "GH_CONFIG_DIR",
+                 "XDG_CONFIG_HOME", "XDG_DATA_HOME",
+                 "GNUPGHOME", "SSH_AUTH_SOCK"]
+    var result: [String: String] = [:]
+    for key in allow { if let v = env[key] { result[key] = v } }
+    if result["PATH"] == nil { result["PATH"] = "/usr/bin:/bin:/opt/homebrew/bin" }
+    if result["HOME"] == nil { result["HOME"] = NSHomeDirectory() }
+    return result
 }()
 
 let POP_W: CGFloat = 560
@@ -121,7 +136,7 @@ func ghShell(_ args: String...) -> Data? {
     let proc = Process()
     proc.executableURL = URL(fileURLWithPath: GH)
     proc.arguments = Array(args)
-    proc.environment = ProcessInfo.processInfo.environment
+    proc.environment = ghEnv
     let outPipe = Pipe()
     let errPipe = Pipe()
     proc.standardOutput = outPipe
@@ -151,7 +166,7 @@ func ghStr(_ args: String...) -> String? {
     let proc = Process()
     proc.executableURL = URL(fileURLWithPath: GH)
     proc.arguments = Array(args)
-    proc.environment = ProcessInfo.processInfo.environment
+    proc.environment = ghEnv
     let pipe = Pipe()
     proc.standardOutput = pipe
     proc.standardError = FileHandle.nullDevice
@@ -1345,7 +1360,10 @@ class SettingsVC: NSViewController {
 
     @objc func addManualRepo() {
         guard let text = addField?.stringValue.trimmingCharacters(in: .whitespaces),
-              !text.isEmpty, text.contains("/") else { return }
+              !text.isEmpty, isValidRepo(text) else {
+            addField?.placeholderString = "Format: owner/repo (letters, numbers, hyphens)"
+            return
+        }
         selected.insert(text)
         if !available.contains(text) { available.append(text) }
         addField?.stringValue = ""
