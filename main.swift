@@ -1,5 +1,6 @@
 import Cocoa
 import UserNotifications
+import os
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
@@ -8,6 +9,7 @@ struct AppConfig: Codable {
     var pollInterval: TimeInterval?
     var pollActiveInterval: TimeInterval?
     var runsPerRepo: Int?
+    var filterDefaultBranches: Bool?
 }
 
 let CONFIG_DIR  = NSString(string: "~/.config/cat-eye").expandingTildeInPath
@@ -17,8 +19,12 @@ var REPOS: [String] = []
 var POLL_NORMAL: TimeInterval = 30
 var POLL_ACTIVE: TimeInterval = 10
 var RUNS_PER_REPO: Int = 10
+var FILTER_DEFAULT_BRANCHES: Bool = false
+let DEFAULT_BRANCHES: Set<String> = ["main", "develop"]
 
 let repoPattern = try! NSRegularExpression(pattern: "^[a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+$")
+
+let log = Logger(subsystem: "com.clintoncodewell.cat-eye", category: "app")
 
 func isValidRepo(_ s: String) -> Bool {
     repoPattern.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)) != nil
@@ -31,11 +37,14 @@ func loadConfig() {
     POLL_NORMAL = c.pollInterval ?? 30
     POLL_ACTIVE = c.pollActiveInterval ?? 10
     RUNS_PER_REPO = c.runsPerRepo ?? 10
+    FILTER_DEFAULT_BRANCHES = c.filterDefaultBranches ?? false
 }
 
 func saveConfig(repos: [String]) {
     try? FileManager.default.createDirectory(atPath: CONFIG_DIR, withIntermediateDirectories: true)
-    let c = AppConfig(repos: repos.filter { isValidRepo($0) }, pollInterval: POLL_NORMAL, pollActiveInterval: POLL_ACTIVE, runsPerRepo: RUNS_PER_REPO)
+    let c = AppConfig(repos: repos.filter { isValidRepo($0) }, pollInterval: POLL_NORMAL,
+                      pollActiveInterval: POLL_ACTIVE, runsPerRepo: RUNS_PER_REPO,
+                      filterDefaultBranches: FILTER_DEFAULT_BRANCHES)
     if let data = try? JSONEncoder().encode(c) {
         let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         if let pretty = try? JSONSerialization.data(withJSONObject: json as Any, options: .prettyPrinted) {
@@ -94,6 +103,7 @@ struct Run: Decodable {
     let startedAt: String?
     let number: Int
     let workflowName: String?
+    let actorLogin: String?
 }
 
 struct PRAuthor: Decodable { let login: String }
@@ -126,11 +136,18 @@ enum PRAction {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-var lastFetchError: String? = nil  // Shown in UI when gh fails
+private let _fetchErrQ = DispatchQueue(label: "com.clintoncodewell.cat-eye.fetchErr")
+private var _lastFetchError: String? = nil
+var lastFetchError: String? {
+    get { _fetchErrQ.sync { _lastFetchError } }
+    set { _fetchErrQ.sync { _lastFetchError = newValue } }
+}
 
 func ghShell(_ args: String...) -> Data? {
     guard FileManager.default.isExecutableFile(atPath: GH) else {
-        lastFetchError = "GitHub CLI not found at \(GH)"
+        let msg = "GitHub CLI not found at \(GH)"
+        log.error("\(msg)")
+        lastFetchError = msg
         return nil
     }
     let proc = Process()
@@ -147,6 +164,7 @@ func ghShell(_ args: String...) -> Data? {
         guard proc.terminationStatus == 0 else {
             let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
             let errStr = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            log.warning("gh \(args.joined(separator: " ")) exited \(proc.terminationStatus): \(errStr)")
             if errStr.contains("auth") || errStr.contains("login") {
                 lastFetchError = "Not authenticated. Run: gh auth login"
             } else if !errStr.isEmpty {
@@ -157,6 +175,7 @@ func ghShell(_ args: String...) -> Data? {
         lastFetchError = nil
         return outPipe.fileHandleForReading.readDataToEndOfFile()
     } catch {
+        log.error("Failed to launch gh: \(error.localizedDescription)")
         lastFetchError = "Failed to run gh: \(error.localizedDescription)"
         return nil
     }
@@ -181,8 +200,8 @@ func ghStr(_ args: String...) -> String? {
 }
 
 func fetchRuns(repo: String) -> [Run] {
-    let fields = "name,displayTitle,status,conclusion,headBranch,event,url,updatedAt,createdAt,startedAt,number,workflowName"
-    guard let data = ghShell("run", "list", "--repo", repo, "--limit", "\(RUNS_PER_REPO)", "--json", fields)
+    let jq = "[.workflow_runs[] | {name, displayTitle: .display_title, status, conclusion, headBranch: .head_branch, event, url: .html_url, updatedAt: .updated_at, createdAt: .created_at, startedAt: .run_started_at, number: .run_number, workflowName: .name, actorLogin: .actor.login}]"
+    guard let data = ghShell("api", "repos/\(repo)/actions/runs?per_page=\(RUNS_PER_REPO)", "--jq", jq)
     else { return [] }
     return (try? JSONDecoder().decode([Run].self, from: data)) ?? []
 }
@@ -277,7 +296,13 @@ func runElapsed(_ r: Run) -> TimeInterval {
 
 func estimatedTotal(for run: Run, history: [Run]) -> TimeInterval? {
     let wf = run.workflowName ?? run.name
-    let completed = history.filter { ($0.workflowName ?? $0.name) == wf && $0.status == "completed" }
+    // Rolling 3-day window of completed runs of the same workflow.
+    let cutoff = Date().addingTimeInterval(-3 * 24 * 3600)
+    let completed = history.filter { r in
+        guard (r.workflowName ?? r.name) == wf, r.status == "completed",
+              let s = parseISO(r.startedAt) ?? parseISO(r.createdAt) else { return false }
+        return s >= cutoff
+    }
     let durs = completed.compactMap { r -> TimeInterval? in
         guard let s = parseISO(r.startedAt) ?? parseISO(r.createdAt),
               let e = parseISO(r.updatedAt) else { return nil }
@@ -285,6 +310,19 @@ func estimatedTotal(for run: Run, history: [Run]) -> TimeInterval? {
     }
     guard !durs.isEmpty else { return nil }
     return durs.reduce(0, +) / Double(durs.count)
+}
+
+let startedFmt: DateFormatter = {
+    let f = DateFormatter(); f.dateFormat = "h:mm a"; return f
+}()
+
+// "Started 11:56 am" / "Started yesterday 3:04 pm" / "Started May 12, 9:01 am"
+func fmtStartedAt(_ iso: String?) -> String {
+    guard let d = parseISO(iso) else { return "" }
+    let cal = Calendar.current
+    if cal.isDateInToday(d) { return "Started \(startedFmt.string(from: d))" }
+    if cal.isDateInYesterday(d) { return "Started yesterday \(startedFmt.string(from: d))" }
+    return "Started \(timestampFmt.string(from: d))"
 }
 
 func sfName(_ r: Run) -> String {
@@ -393,63 +431,116 @@ class RunRow: NSView {
     let urlStr: String
     var trackingArea: NSTrackingArea?
 
-    init(_ run: Run, history: [Run], w: CGFloat) {
-        self.urlStr = run.url
+    init(group: [Run], history: [Run], w: CGFloat) {
+        let primary = RunRow.pickPrimary(group)
+        self.urlStr = primary.url
         super.init(frame: NSRect(x: 0, y: 0, width: w, height: ROW_H))
         wantsLayer = true
-        build(run, history: history, w: w)
+        build(group: group, primary: primary, history: history, w: w)
     }
     required init?(coder: NSCoder) { fatalError() }
 
-    func build(_ run: Run, history: [Run], w: CGFloat) {
+    // Pick the run that drives the status icon, click target, and elapsed/ETA.
+    // Priority: in_progress (longest-running) > queued > completed-failure > anything else.
+    static func pickPrimary(_ group: [Run]) -> Run {
+        let inProg = group.filter { $0.status == "in_progress" }
+        if let r = inProg.max(by: { runElapsed($0) < runElapsed($1) }) { return r }
+        if let r = group.first(where: { $0.status == "queued" }) { return r }
+        if let r = group.first(where: { $0.status == "completed" && $0.conclusion == "failure" }) { return r }
+        return group[0]
+    }
+
+    func build(group: [Run], primary: Run, history: [Run], w: CGFloat) {
         let pad: CGFloat = 12, iconSz: CGFloat = 20
-        let textX = pad + iconSz + 10, copyW: CGFloat = 28, rightZone: CGFloat = 160
-        let textW = w - textX - rightZone - copyW
+        let textX = pad + iconSz + 10, copyW: CGFloat = 28
+        let rightW: CGFloat = 165          // fixed allocation for start time + duration
+        let rightX = w - rightW - copyW - 4
+        let textW = rightX - textX - 8     // leave 8px gap before the right column
 
         let iv = NSImageView(frame: NSRect(x: pad, y: (ROW_H - iconSz) / 2, width: iconSz, height: iconSz))
-        let statusDesc = "\(run.status) \(run.conclusion ?? "")"
-        if let img = NSImage(systemSymbolName: sfName(run), accessibilityDescription: statusDesc) {
-            iv.image = img; iv.contentTintColor = sfColor(run)
+        let statusDesc = "\(primary.status) \(primary.conclusion ?? "")"
+        if let img = NSImage(systemSymbolName: sfName(primary), accessibilityDescription: statusDesc) {
+            iv.image = img; iv.contentTintColor = sfColor(primary)
             iv.symbolConfiguration = .init(pointSize: 14, weight: .semibold)
         }
         addSubview(iv)
 
-        let title = lbl(String(run.displayTitle.prefix(70)), .systemFont(ofSize: 12.5, weight: .semibold))
+        let title = lbl(String(primary.displayTitle.prefix(80)), .systemFont(ofSize: 12.5, weight: .semibold))
         title.frame = NSRect(x: textX, y: ROW_H - 24, width: textW, height: 18)
         title.lineBreakMode = .byTruncatingTail
         addSubview(title)
 
-        let wf = run.workflowName ?? run.name
-        let sub = lbl("\(wf) #\(run.number) \u{00B7} \(run.event)", .systemFont(ofSize: 11), .secondaryLabelColor)
-        sub.frame = NSRect(x: textX, y: 6, width: textW, height: 16)
+        // Subtitle: branch + event + actor. For groups, the workflow list collapses to "N workflows"
+        // and a small stack chip with a (done/total) progress counter sits at the front.
+        let actor = primary.actorLogin.map { " by \($0)" } ?? ""
+        let branch = primary.headBranch.isEmpty ? "" : " \u{00B7} \(primary.headBranch)"
+        var subX = textX
+        var subRemaining = textW
+
+        if group.count > 1 {
+            let done = group.filter { $0.status == "completed" }.count
+            let chip = makeGroupChip(done: done, total: group.count)
+            chip.frame.origin = NSPoint(x: subX, y: 6)
+            addSubview(chip)
+            subX += chip.frame.width + 6
+            subRemaining -= chip.frame.width + 6
+        }
+
+        let wf = primary.workflowName ?? primary.name
+        let prefix = group.count > 1
+            ? "\(group.count) workflows"
+            : "\(wf) #\(primary.number)"
+        let sub = lbl("\(prefix)\(branch) \u{00B7} \(primary.event)\(actor)",
+                      .systemFont(ofSize: 11), .secondaryLabelColor)
+        sub.frame = NSRect(x: subX, y: 6, width: subRemaining, height: 16)
         sub.lineBreakMode = .byTruncatingTail
         addSubview(sub)
 
-        let badge = Badge(String(run.headBranch.prefix(20)))
-        badge.frame.origin = NSPoint(x: w - rightZone - copyW, y: ROW_H / 2 + 2)
-        addSubview(badge)
+        // Time column. For groups: earliest start, longest elapsed (driven by primary).
+        let groupStart = group.compactMap { parseISO($0.startedAt) ?? parseISO($0.createdAt) }.min()
+        let startedISO: String? = groupStart.map { isoFmt.string(from: $0) } ?? (primary.startedAt ?? primary.createdAt)
 
-        let rX = badge.frame.maxX + 6, rW = w - rX - copyW - 4
+        let anyActive = group.contains { $0.status == "in_progress" || $0.status == "queued" }
+        if anyActive {
+            let elapsed = runElapsed(primary)
+            let started = lbl(fmtStartedAt(startedISO), .systemFont(ofSize: 10.5), .secondaryLabelColor)
+            started.alignment = .right
+            started.frame = NSRect(x: rightX, y: ROW_H - 23, width: rightW, height: 14)
+            addSubview(started)
 
-        if run.status == "in_progress" || run.status == "queued" {
-            let elapsed = runElapsed(run)
-            let el = lbl("\(fmtDuration(elapsed)) elapsed", .monospacedDigitSystemFont(ofSize: 10.5, weight: .medium), .systemOrange)
-            el.alignment = .right; el.frame = NSRect(x: rX, y: ROW_H - 23, width: rW, height: 14)
+            let el = lbl("\(fmtDuration(elapsed)) elapsed",
+                         .monospacedDigitSystemFont(ofSize: 10.5, weight: .medium), .systemOrange)
+            el.alignment = .right
+            el.frame = NSRect(x: rightX, y: 22, width: rightW, height: 14)
             addSubview(el)
+
             var etaText = "estimating..."
-            if let est = estimatedTotal(for: run, history: history) {
+            if let est = estimatedTotal(for: primary, history: history) {
                 let rem = max(0, est - elapsed)
                 etaText = rem > 0 ? "~\(fmtDuration(rem)) remaining" : "finishing..."
             }
             let eta = lbl(etaText, .systemFont(ofSize: 10), .secondaryLabelColor)
-            eta.alignment = .right; eta.frame = NSRect(x: rX, y: 6, width: rW, height: 14)
+            eta.alignment = .right
+            eta.frame = NSRect(x: rightX, y: 6, width: rightW, height: 14)
             addSubview(eta)
         } else {
-            let ts = lbl(fmtTimestamp(run.updatedAt), .systemFont(ofSize: 10.5), .secondaryLabelColor)
-            ts.alignment = .right; ts.frame = NSRect(x: rX, y: ROW_H - 23, width: rW, height: 14)
-            addSubview(ts)
-            let dur = lbl("\(runDuration(run))", .systemFont(ofSize: 10), .secondaryLabelColor)
-            dur.alignment = .right; dur.frame = NSRect(x: rX, y: 6, width: rW, height: 14)
+            let started = lbl(fmtStartedAt(startedISO), .systemFont(ofSize: 10.5), .secondaryLabelColor)
+            started.alignment = .right
+            started.frame = NSRect(x: rightX, y: ROW_H - 23, width: rightW, height: 14)
+            addSubview(started)
+
+            // For groups: total wall-clock from earliest start to latest end.
+            let durText: String
+            if group.count > 1,
+               let s = groupStart,
+               let e = group.compactMap({ parseISO($0.updatedAt) }).max() {
+                durText = fmtDuration(e.timeIntervalSince(s))
+            } else {
+                durText = runDuration(primary)
+            }
+            let dur = lbl(durText, .systemFont(ofSize: 10), .secondaryLabelColor)
+            dur.alignment = .right
+            dur.frame = NSRect(x: rightX, y: 6, width: rightW, height: 14)
             addSubview(dur)
         }
 
@@ -468,6 +559,30 @@ class RunRow: NSView {
         let l = NSTextField(labelWithString: text)
         l.font = font; l.textColor = color; l.maximumNumberOfLines = 1
         l.cell?.truncatesLastVisibleLine = true; return l
+    }
+
+    // Subtle "stack + (done/total)" indicator for grouped workflow runs.
+    func makeGroupChip(done: Int, total: Int) -> NSView {
+        let countText = "\(done)/\(total)"
+        let font = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .semibold)
+        let textW = (countText as NSString).size(withAttributes: [.font: font]).width
+        let iconW: CGFloat = 11, gap: CGFloat = 3, padX: CGFloat = 5
+        let w = padX + iconW + gap + textW + padX
+        let chip = NSView(frame: NSRect(x: 0, y: 0, width: w, height: 16))
+
+        let iv = NSImageView(frame: NSRect(x: padX, y: 2, width: iconW, height: 11))
+        if let img = NSImage(systemSymbolName: "square.stack.3d.up.fill", accessibilityDescription: "\(total) workflows") {
+            iv.image = img; iv.contentTintColor = .secondaryLabelColor
+            iv.symbolConfiguration = .init(pointSize: 9, weight: .medium)
+        }
+        chip.addSubview(iv)
+
+        let l = NSTextField(labelWithString: countText)
+        l.font = font; l.textColor = .secondaryLabelColor
+        l.frame = NSRect(x: padX + iconW + gap, y: 0, width: textW + 1, height: 14)
+        chip.addSubview(l)
+        chip.toolTip = "\(done) of \(total) workflows complete"
+        return chip
     }
 
     @objc func copyURL(_ sender: Any?) {
@@ -689,7 +804,8 @@ class PRDetailView: NSView {
     init(_ pr: PR, repo: String, w: CGFloat) {
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.4).cgColor
+        // Inverse-of-background tint so the expanded panel is distinct from the doc bg in both modes.
+        layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.06).cgColor
         let pad: CGFloat = 42, rPad: CGFloat = 16
         let contentW = w - pad - rPad
         var y: CGFloat = 8
@@ -844,7 +960,9 @@ class Badge: NSView {
     override func draw(_ dirtyRect: NSRect) {
         let r = bounds.insetBy(dx: 0.5, dy: 0.5)
         let p = NSBezierPath(roundedRect: r, xRadius: 6, yRadius: 6)
-        NSColor.controlBackgroundColor.withAlphaComponent(0.85).setFill(); p.fill()
+        // Inverse-of-background fill so the badge is visible in both modes:
+        // dark fill in light mode, light fill in dark mode.
+        NSColor.labelColor.withAlphaComponent(0.08).setFill(); p.fill()
         NSColor.separatorColor.setStroke(); p.lineWidth = 0.5; p.stroke()
         let a: [NSAttributedString.Key: Any] = [
             .font: NSFont.monospacedSystemFont(ofSize: 10, weight: .medium),
@@ -1001,6 +1119,17 @@ class TabVC: NSViewController {
         seg.font = .systemFont(ofSize: 11, weight: .medium)
         topBar.addSubview(seg)
 
+        // Main/develop-only checkbox (Actions tab only)
+        if selectedTab == 0 {
+            let cb = NSButton(checkboxWithTitle: "Main/develop only",
+                              target: self, action: #selector(toggleBranchFilter(_:)))
+            cb.font = .systemFont(ofSize: 11)
+            cb.state = FILTER_DEFAULT_BRANCHES ? .on : .off
+            cb.frame = NSRect(x: 220, y: 8, width: 140, height: 20)
+            cb.toolTip = "Hide workflow runs from branches other than main or develop"
+            topBar.addSubview(cb)
+        }
+
         let repoFilter = NSPopUpButton(frame: NSRect(x: w - 200, y: 6, width: 188, height: 24), pullsDown: false)
         repoFilter.font = .systemFont(ofSize: 11)
         repoFilter.addItem(withTitle: "All Repos")
@@ -1080,8 +1209,34 @@ class TabVC: NSViewController {
         }
         for (repo, runs) in data {
             rows.append(Header(repo, w: w))
-            if runs.isEmpty { rows.append(EmptyRow("No recent runs", w: w)) }
-            else { for run in runs { rows.append(RunRow(run, history: runs, w: w)) } }
+            let visible = FILTER_DEFAULT_BRANCHES
+                ? runs.filter { DEFAULT_BRANCHES.contains($0.headBranch) }
+                : runs
+            if visible.isEmpty {
+                let msg = FILTER_DEFAULT_BRANCHES && !runs.isEmpty
+                    ? "No recent runs on main or develop"
+                    : "No recent runs"
+                rows.append(EmptyRow(msg, w: w))
+            } else {
+                let sorted = visible.sorted { a, b in
+                    let aActive = a.status == "in_progress" || a.status == "queued"
+                    let bActive = b.status == "in_progress" || b.status == "queued"
+                    if aActive != bActive { return aActive }
+                    return false  // preserve API order otherwise
+                }
+                // Group runs from the same push (same commit message + branch + event + actor)
+                // into a single row. Different workflows triggered by one commit collapse.
+                var groups: [[Run]] = []
+                var indexByKey: [String: Int] = [:]
+                for run in sorted {
+                    let key = "\(run.displayTitle)|\(run.headBranch)|\(run.event)|\(run.actorLogin ?? "")"
+                    if let i = indexByKey[key] { groups[i].append(run) }
+                    else { indexByKey[key] = groups.count; groups.append([run]) }
+                }
+                for group in groups {
+                    rows.append(RunRow(group: group, history: visible, w: w))
+                }
+            }
         }
         if rows.isEmpty { rows.append(EmptyRow("No actions to show", w: w)) }
         return rows
@@ -1133,6 +1288,13 @@ class TabVC: NSViewController {
         selectedTab = sender.selectedSegment
         (NSApp.delegate as? GHActionsBar)?.selectedTab = selectedTab
         expandedPR = nil
+        // Rebuild the whole view so the checkbox shows/hides with the tab.
+        loadView()
+    }
+
+    @objc func toggleBranchFilter(_ sender: NSButton) {
+        FILTER_DEFAULT_BRANCHES = (sender.state == .on)
+        saveConfig(repos: REPOS)
         rebuildContent()
     }
 
@@ -1429,14 +1591,20 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
     var prevStatuses: [String: String] = [:]
     var selectedTab: Int = 0
     var selectedRepo: String? = nil
+    var appearanceObs: NSKeyValueObservation?
 
     func applicationDidFinishLaunching(_ note: Notification) {
+        log.info("Cat Eye launching — repos: \(REPOS.count), poll: \(POLL_NORMAL)s/\(POLL_ACTIVE)s")
         loadConfig()
+        log.info("Config loaded — tracking \(REPOS.count) repos: \(REPOS.joined(separator: ", "))")
         ghIcon = loadGHIcon()
 
         let nc = UNUserNotificationCenter.current()
         nc.delegate = self
-        nc.requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
+        nc.requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
+            if granted { log.info("Notification permission granted") }
+            else { log.warning("Notification permission denied: \(error?.localizedDescription ?? "user declined")") }
+        }
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let btn = statusItem.button {
@@ -1444,12 +1612,23 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
             btn.imagePosition = .imageOnly
             btn.target = self
             btn.action = #selector(toggle)
+            // Re-render the cached tinted icon when the system flips light/dark.
+            appearanceObs = btn.observe(\.effectiveAppearance, options: [.new]) { [weak self] _, _ in
+                DispatchQueue.main.async { self?.updateIcon() }
+            }
         }
 
         popover = NSPopover()
         popover.behavior = .transient
         popover.animates = true
         popover.delegate = self
+        applySystemAppearance()   // pins NSApp.appearance + popover.appearance from defaults
+
+        // System-wide light/dark toggle. NSApp.effectiveAppearance is unreliable for
+        // .accessory apps, so we listen for the canonical distributed notification.
+        DistributedNotificationCenter.default.addObserver(
+            self, selector: #selector(systemAppearanceChanged),
+            name: NSNotification.Name("AppleInterfaceThemeChangedNotification"), object: nil)
 
         if REPOS.isEmpty {
             // First run: open popover with settings
@@ -1477,24 +1656,34 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
 
     func refresh(completion: (() -> Void)? = nil) {
         guard !REPOS.isEmpty else { completion?(); return }
+        let repos = REPOS  // snapshot on calling thread
+        let start = Date()
+        log.debug("Refresh starting for \(repos.count) repos")
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self = self else { return }
-            var runRes = Array(repeating: (String, [Run])("", []), count: REPOS.count)
-            var prRes = Array(repeating: (String, [PR])("", []), count: REPOS.count)
+            var runRes = Array(repeating: (String, [Run])("", []), count: repos.count)
+            var prRes = Array(repeating: (String, [PR])("", []), count: repos.count)
+            let collectQ = DispatchQueue(label: "com.clintoncodewell.cat-eye.collect")
             let group = DispatchGroup()
-            for (i, repo) in REPOS.enumerated() {
+            for (i, repo) in repos.enumerated() {
                 group.enter()
                 DispatchQueue.global(qos: .utility).async {
-                    runRes[i] = (repo, fetchRuns(repo: repo))
+                    let runs = fetchRuns(repo: repo)
+                    collectQ.sync { runRes[i] = (repo, runs) }
                     group.leave()
                 }
                 group.enter()
                 DispatchQueue.global(qos: .utility).async {
-                    prRes[i] = (repo, fetchPRs(repo: repo))
+                    let prs = fetchPRs(repo: repo)
+                    collectQ.sync { prRes[i] = (repo, prs) }
                     group.leave()
                 }
             }
             group.wait()
+            let elapsed = Date().timeIntervalSince(start)
+            let totalRuns = runRes.reduce(0) { $0 + $1.1.count }
+            let totalPRs = prRes.reduce(0) { $0 + $1.1.count }
+            log.info("Refresh done in \(String(format: "%.1f", elapsed))s — \(totalRuns) runs, \(totalPRs) PRs")
             DispatchQueue.main.async {
                 self.detectTransitions(runRes)
                 self.grouped = runRes
@@ -1559,10 +1748,12 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
             let old = prevStatuses[run.url]
             let wf = run.workflowName ?? run.name
             if run.status == "in_progress" && old != "in_progress" {
+                log.info("Transition: \(wf) on \(run.headBranch) → in_progress (was \(old ?? "new"))")
                 notify(title: "\u{25B6}\u{FE0F} Action Started", body: "\(wf) on \(run.headBranch)", id: "start-\(run.url)")
             }
             if run.status == "completed" && (old == "in_progress" || old == "queued") {
                 let ok = run.conclusion == "success"
+                log.info("Transition: \(wf) on \(run.headBranch) → \(run.conclusion ?? "unknown") (was \(old ?? "new"))")
                 notify(title: ok ? "\u{2705} Action Passed" : "\u{274C} Action Failed",
                        body: "\(wf) on \(run.headBranch) \u{2014} \(runDuration(run))", id: "end-\(run.url)")
             }
@@ -1598,16 +1789,72 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
     @objc func toggle() {
         if popover.isShown { popover.close() }
         else if Date().timeIntervalSince(closeTime) > 0.3 {
+            // Pin appearance BEFORE constructing the view tree so .cgColor resolves correctly.
+            applySystemAppearance()
             if popover.contentViewController == nil || popover.contentViewController is TabVC {
-                popover.contentViewController = makeTabVC()
+                buildWithAppearance { self.popover.contentViewController = self.makeTabVC() }
             }
             NSApp.activate(ignoringOtherApps: true)
             popover.show(relativeTo: statusItem.button!.bounds, of: statusItem.button!, preferredEdge: .minY)
         }
     }
 
+    /// True if the system is currently in Dark Mode. Reads CFPreferences directly because
+    /// UserDefaults.standard caches the value and serves stale results immediately after
+    /// the user flips appearance.
+    func isSystemDarkMode() -> Bool {
+        let v = CFPreferencesCopyAppValue("AppleInterfaceStyle" as CFString,
+                                          kCFPreferencesAnyApplication) as? String
+        return v == "Dark"
+    }
+
+    func applySystemAppearance() {
+        let appearance = NSAppearance(named: isSystemDarkMode() ? .darkAqua : .aqua)
+        // NSApp.appearance pins how `NSColor.X.cgColor` resolves process-wide.
+        NSApp.appearance = appearance
+        popover.appearance = appearance
+    }
+
+    /// Construct views inside an explicit drawing-appearance context so every
+    /// `NSColor.X.cgColor` accessed during construction resolves with the right colors.
+    /// Without this, `layer.backgroundColor` ends up baked in whichever appearance the
+    /// process happened to last be drawing under.
+    func buildWithAppearance(_ block: () -> Void) {
+        let appearance = NSApp.appearance ?? NSApp.effectiveAppearance
+        if #available(macOS 11.0, *) {
+            appearance.performAsCurrentDrawingAppearance { block() }
+        } else {
+            let prev = NSAppearance.current
+            NSAppearance.current = appearance
+            block()
+            NSAppearance.current = prev
+        }
+    }
+
+    @objc func systemAppearanceChanged() {
+        // Distributed notifications can arrive on a background thread; also CFPreferences
+        // may not have flushed yet — a tiny hop to the next main runloop is reliable.
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.applySystemAppearance()
+            self.updateIcon()
+            // Discard the stale view tree (its CGColors are baked in the OLD appearance).
+            // Next show reconstructs under the new drawing context.
+            let wasShownAsSettings = self.popover.contentViewController is SettingsVC
+            let wasShown = self.popover.isShown
+            self.popover.close()
+            self.popover.contentViewController = nil
+            if wasShown {
+                self.closeTime = .distantPast
+                if wasShownAsSettings { self.showSettings() }
+                else { self.toggle() }
+            }
+        }
+    }
+
     @objc func showSettings() {
-        popover.contentViewController = SettingsVC(current: Set(REPOS))
+        applySystemAppearance()
+        buildWithAppearance { self.popover.contentViewController = SettingsVC(current: Set(REPOS)) }
         if !popover.isShown {
             closeTime = .distantPast
             toggle()
@@ -1615,7 +1862,8 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
     }
 
     @objc func showList() {
-        popover.contentViewController = makeTabVC()
+        applySystemAppearance()
+        buildWithAppearance { self.popover.contentViewController = self.makeTabVC() }
     }
 
     @objc func doRefresh() {
@@ -1627,7 +1875,7 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
         }
     }
 
-    @objc func quitApp() { NSApp.terminate(nil) }
+    @objc func quitApp() { log.info("Cat Eye quitting"); NSApp.terminate(nil) }
 
     func popoverDidClose(_ notification: Notification) {
         closeTime = Date()
