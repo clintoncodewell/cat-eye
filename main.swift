@@ -77,7 +77,7 @@ let ghEnv: [String: String] = {
     return result
 }()
 
-let POP_W: CGFloat = 560
+let POP_W: CGFloat = 660
 let POP_MAX_H: CGFloat = 700
 let ROW_H: CGFloat = 56
 let HDR_H: CGFloat = 32
@@ -91,11 +91,13 @@ let GH_ICON_B64 = "iVBORw0KGgoAAAANSUhEUgAAACQAAAAkCAYAAADhAJiYAAAABGdBTUEAALGPC
 // ─── Model ───────────────────────────────────────────────────────────────────
 
 struct Run: Decodable {
+    let id: Int
     let name: String
     let displayTitle: String
     let status: String
     let conclusion: String?
     let headBranch: String
+    let headSha: String
     let event: String
     let url: String
     let updatedAt: String
@@ -200,10 +202,70 @@ func ghStr(_ args: String...) -> String? {
 }
 
 func fetchRuns(repo: String) -> [Run] {
-    let jq = "[.workflow_runs[] | {name, displayTitle: .display_title, status, conclusion, headBranch: .head_branch, event, url: .html_url, updatedAt: .updated_at, createdAt: .created_at, startedAt: .run_started_at, number: .run_number, workflowName: .name, actorLogin: .actor.login}]"
+    let jq = "[.workflow_runs[] | {id, name, displayTitle: .display_title, status, conclusion, headBranch: .head_branch, headSha: .head_sha, event, url: .html_url, updatedAt: .updated_at, createdAt: .created_at, startedAt: .run_started_at, number: .run_number, workflowName: .name, actorLogin: .actor.login}]"
     guard let data = ghShell("api", "repos/\(repo)/actions/runs?per_page=\(RUNS_PER_REPO)", "--jq", jq)
     else { return [] }
     return (try? JSONDecoder().decode([Run].self, from: data)) ?? []
+}
+
+// ─── Run Detail Fetching ─────────────────────────────────────────────────────
+
+struct RunFailure {
+    let job: String
+    let step: String?
+    let messages: [String]   // exact annotation messages from the checks API
+}
+
+struct RunJobStep: Decodable { let name: String; let conclusion: String? }
+struct RunJob: Decodable { let id: Int; let name: String; let conclusion: String?; let steps: [RunJobStep]? }
+struct CheckAnnotation: Decodable {
+    let message: String?
+    let path: String?
+    let startLine: Int?
+    let annotationLevel: String?
+}
+
+// Lazily-fetched run detail data. Main-thread access only.
+var commitMsgCache: [String: String] = [:]       // head sha → full commit message
+var failureCache: [Int: [RunFailure]] = [:]      // run id → failure summaries (stable once completed)
+var detailFetchInFlight = Set<String>()
+
+func fetchCommitMessage(repo: String, sha: String) -> String? {
+    guard !sha.isEmpty,
+          let data = ghShell("api", "repos/\(repo)/commits/\(sha)", "--jq", ".commit.message"),
+          let s = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+          !s.isEmpty else { return nil }
+    return s
+}
+
+// The failure message GitHub shows in its annotations box: list the run's jobs,
+// and for each failed job pull its check-run annotations (a job's id IS its
+// check-run id) plus the name of the step that failed.
+func fetchRunFailures(repo: String, runId: Int) -> [RunFailure] {
+    let jq = "[.jobs[] | {id, name, conclusion, steps: [.steps[]? | {name, conclusion}]}]"
+    guard let data = ghShell("api", "repos/\(repo)/actions/runs/\(runId)/jobs?per_page=50", "--jq", jq),
+          let jobs = try? JSONDecoder().decode([RunJob].self, from: data) else { return [] }
+    var out: [RunFailure] = []
+    for job in jobs where job.conclusion == "failure" {
+        if out.count >= 3 { break }
+        let step = job.steps?.first(where: { $0.conclusion == "failure" })?.name
+        var msgs: [String] = []
+        let ajq = "[.[] | {message, path, startLine: .start_line, annotationLevel: .annotation_level}]"
+        if let aData = ghShell("api", "repos/\(repo)/check-runs/\(job.id)/annotations", "--jq", ajq),
+           let anns = try? JSONDecoder().decode([CheckAnnotation].self, from: aData) {
+            for a in anns where a.annotationLevel == "failure" {
+                guard var m = a.message?.trimmingCharacters(in: .whitespacesAndNewlines), !m.isEmpty else { continue }
+                if m.count > 400 { m = String(m.prefix(400)) + "\u{2026}" }
+                if let p = a.path, !p.isEmpty, p != ".github", let ln = a.startLine {
+                    m = "\(p):\(ln)\n\(m)"
+                }
+                msgs.append(m)
+                if msgs.count >= 3 { break }
+            }
+        }
+        out.append(RunFailure(job: job.name, step: step, messages: msgs))
+    }
+    return out
 }
 
 func fetchPRs(repo: String) -> [PR] {
@@ -325,6 +387,30 @@ func fmtStartedAt(_ iso: String?) -> String {
     return "Started \(timestampFmt.string(from: d))"
 }
 
+// Colour-blind-safe status palette (Okabe-Ito). Hues separate on the blue–yellow
+// axis so they stay distinguishable under deutan/protan/tritan vision; shape and
+// text carry the state as well, colour is never the only signal.
+let C_SUCCESS = NSColor(srgbRed: 0.00, green: 0.62, blue: 0.45, alpha: 1)  // bluish green
+let C_FAILURE = NSColor(srgbRed: 0.84, green: 0.37, blue: 0.00, alpha: 1)  // vermillion
+let C_RUNNING = NSColor(srgbRed: 0.34, green: 0.71, blue: 0.91, alpha: 1)  // sky blue
+let C_QUEUED  = NSColor(srgbRed: 0.90, green: 0.62, blue: 0.00, alpha: 1)  // amber
+
+func statusText(_ r: Run) -> String {
+    switch r.status {
+    case "in_progress": return "In progress"
+    case "queued", "waiting", "pending": return "Queued"
+    case "completed":
+        switch r.conclusion ?? "" {
+        case "success": return "Succeeded"
+        case "failure": return "Failed"
+        case "cancelled": return "Cancelled"
+        case "skipped": return "Skipped"
+        default: return "Completed"
+        }
+    default: return r.status
+    }
+}
+
 func sfName(_ r: Run) -> String {
     switch r.status {
     case "in_progress": return "hourglass.circle.fill"
@@ -343,28 +429,34 @@ func sfName(_ r: Run) -> String {
 
 func sfColor(_ r: Run) -> NSColor {
     switch r.status {
-    case "in_progress": return .systemOrange
-    case "queued", "waiting", "pending": return .systemYellow
+    case "in_progress": return C_RUNNING
+    case "queued", "waiting", "pending": return C_QUEUED
     case "completed":
         switch r.conclusion ?? "" {
-        case "success": return .systemGreen
-        case "failure": return .systemRed
+        case "success": return C_SUCCESS
+        case "failure": return C_FAILURE
         default: return .systemGray
         }
     default: return .secondaryLabelColor
     }
 }
 
-func overallColor(_ g: [(String, [Run])]) -> NSColor {
+// Overall state for the menu bar: tint colour + badge glyph + readable label.
+// The glyph shape carries the state so the icon works without colour perception.
+func overallStatus(_ g: [(String, [Run])]) -> (color: NSColor, badge: String?, label: String) {
     let all = g.flatMap { $0.1 }
-    if all.isEmpty { return .secondaryLabelColor }
-    if all.contains(where: { $0.status == "in_progress" || $0.status == "queued" }) { return .systemOrange }
+    if all.isEmpty { return (.secondaryLabelColor, nil, "No runs") }
+    if all.contains(where: { $0.status == "in_progress" || $0.status == "queued" }) {
+        return (C_RUNNING, "hourglass.circle.fill", "Run in progress")
+    }
     let key = all.filter {
         let wf = ($0.workflowName ?? $0.name).lowercased()
         return wf.contains("deploy") || wf.contains("smoke")
     }
-    if let top = (key.isEmpty ? all : key).first, top.conclusion == "failure" { return .systemRed }
-    return .systemGreen
+    if let top = (key.isEmpty ? all : key).first, top.conclusion == "failure" {
+        return (C_FAILURE, "xmark.circle.fill", "Run failed")
+    }
+    return (C_SUCCESS, "checkmark.circle.fill", "All runs passing")
 }
 
 func hasActive(_ g: [(String, [Run])]) -> Bool {
@@ -386,9 +478,9 @@ func prReviewIcon(_ pr: PR) -> String {
 func prReviewColor(_ pr: PR) -> NSColor {
     if pr.isDraft { return .systemGray }
     switch pr.reviewDecision ?? "" {
-    case "APPROVED": return .systemGreen
-    case "CHANGES_REQUESTED": return .systemRed
-    case "REVIEW_REQUIRED": return .systemYellow
+    case "APPROVED": return C_SUCCESS
+    case "CHANGES_REQUESTED": return C_FAILURE
+    case "REVIEW_REQUIRED": return C_QUEUED
     default: return .secondaryLabelColor
     }
 }
@@ -425,20 +517,62 @@ func tintedIcon(_ base: NSImage?, _ color: NSColor) -> NSImage {
     return img
 }
 
+// Menu bar icon with a small status glyph (check / cross / hourglass) punched into
+// the bottom-right corner — the shape conveys state independently of the tint colour.
+func statusBadgedIcon(_ base: NSImage?, color: NSColor, badge: String?) -> NSImage {
+    guard let base = base else { return NSImage() }
+    let sz = base.size
+    let img = NSImage(size: sz, flipped: false) { rect in
+        base.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1.0)
+        color.set()
+        rect.fill(using: .sourceAtop)
+        guard let name = badge,
+              let sym = NSImage(systemSymbolName: name, accessibilityDescription: nil) else { return true }
+        let b: CGFloat = 10
+        let bRect = NSRect(x: sz.width - b, y: 0, width: b, height: b)
+        // Punch a clear ring so the badge separates from the cat silhouette.
+        if let ctx = NSGraphicsContext.current?.cgContext {
+            ctx.saveGState()
+            ctx.setBlendMode(.destinationOut)
+            NSColor.black.set()
+            NSBezierPath(ovalIn: bRect.insetBy(dx: -1.5, dy: -1.5)).fill()
+            ctx.restoreGState()
+        }
+        let tinted = NSImage(size: bRect.size, flipped: false) { r in
+            sym.draw(in: r, from: .zero, operation: .sourceOver, fraction: 1.0)
+            color.set()
+            r.fill(using: .sourceAtop)
+            return true
+        }
+        tinted.draw(in: bRect, from: .zero, operation: .sourceOver, fraction: 1.0)
+        return true
+    }
+    img.isTemplate = false
+    return img
+}
+
 // ─── Run Row View ────────────────────────────────────────────────────────────
 
 class RunRow: NSView {
     let urlStr: String
+    let expanded: Bool
+    var onToggle: (() -> Void)?
     var trackingArea: NSTrackingArea?
 
-    init(group: [Run], history: [Run], w: CGFloat) {
+    init(group: [Run], history: [Run], w: CGFloat, expanded: Bool = false) {
         let primary = RunRow.pickPrimary(group)
         self.urlStr = primary.url
+        self.expanded = expanded
         super.init(frame: NSRect(x: 0, y: 0, width: w, height: ROW_H))
         wantsLayer = true
+        layer?.backgroundColor = restingColor
         build(group: group, primary: primary, history: history, w: w)
     }
     required init?(coder: NSCoder) { fatalError() }
+
+    var restingColor: CGColor? {
+        expanded ? NSColor.selectedContentBackgroundColor.withAlphaComponent(0.1).cgColor : nil
+    }
 
     // Pick the run that drives the status icon, click target, and elapsed/ETA.
     // Priority: in_progress (longest-running) > queued > completed-failure > anything else.
@@ -452,28 +586,29 @@ class RunRow: NSView {
 
     func build(group: [Run], primary: Run, history: [Run], w: CGFloat) {
         let pad: CGFloat = 12, iconSz: CGFloat = 20
-        let textX = pad + iconSz + 10, copyW: CGFloat = 28
+        let textX = pad + iconSz + 10, linkW: CGFloat = 28, copyW: CGFloat = 28
         let rightW: CGFloat = 165          // fixed allocation for start time + duration
-        let rightX = w - rightW - copyW - 4
+        let rightX = w - rightW - linkW - copyW - 8
         let textW = rightX - textX - 8     // leave 8px gap before the right column
 
         let iv = NSImageView(frame: NSRect(x: pad, y: (ROW_H - iconSz) / 2, width: iconSz, height: iconSz))
-        let statusDesc = "\(primary.status) \(primary.conclusion ?? "")"
+        let statusDesc = statusText(primary)
         if let img = NSImage(systemSymbolName: sfName(primary), accessibilityDescription: statusDesc) {
             iv.image = img; iv.contentTintColor = sfColor(primary)
             iv.symbolConfiguration = .init(pointSize: 14, weight: .semibold)
         }
+        iv.toolTip = statusDesc
         addSubview(iv)
 
-        let title = lbl(String(primary.displayTitle.prefix(80)), .systemFont(ofSize: 12.5, weight: .semibold))
+        let title = lbl(primary.displayTitle, .systemFont(ofSize: 12.5, weight: .semibold))
         title.frame = NSRect(x: textX, y: ROW_H - 24, width: textW, height: 18)
         title.lineBreakMode = .byTruncatingTail
+        title.toolTip = primary.displayTitle
         addSubview(title)
 
-        // Subtitle: branch + event + actor. For groups, the workflow list collapses to "N workflows"
-        // and a small stack chip with a (done/total) progress counter sits at the front.
+        // Subtitle: branch badge + event + actor. For groups, the workflow list collapses to
+        // "N workflows" and a small stack chip with a (done/total) progress counter sits at the front.
         let actor = primary.actorLogin.map { " by \($0)" } ?? ""
-        let branch = primary.headBranch.isEmpty ? "" : " \u{00B7} \(primary.headBranch)"
         var subX = textX
         var subRemaining = textW
 
@@ -486,14 +621,25 @@ class RunRow: NSView {
             subRemaining -= chip.frame.width + 6
         }
 
+        if !primary.headBranch.isEmpty {
+            // Branch gets its own badge: middle truncation keeps both ends of long
+            // dependabot-style names visible, and the tooltip shows the full name.
+            let bb = Badge(primary.headBranch, maxWidth: 200)
+            bb.frame.origin = NSPoint(x: subX, y: 4)
+            addSubview(bb)
+            subX += bb.frame.width + 6
+            subRemaining -= bb.frame.width + 6
+        }
+
         let wf = primary.workflowName ?? primary.name
         let prefix = group.count > 1
             ? "\(group.count) workflows"
             : "\(wf) #\(primary.number)"
-        let sub = lbl("\(prefix)\(branch) \u{00B7} \(primary.event)\(actor)",
+        let sub = lbl("\(prefix) \u{00B7} \(primary.event)\(actor)",
                       .systemFont(ofSize: 11), .secondaryLabelColor)
         sub.frame = NSRect(x: subX, y: 6, width: subRemaining, height: 16)
         sub.lineBreakMode = .byTruncatingTail
+        sub.toolTip = sub.stringValue
         addSubview(sub)
 
         // Time column. For groups: earliest start, longest elapsed (driven by primary).
@@ -509,7 +655,7 @@ class RunRow: NSView {
             addSubview(started)
 
             let el = lbl("\(fmtDuration(elapsed)) elapsed",
-                         .monospacedDigitSystemFont(ofSize: 10.5, weight: .medium), .systemOrange)
+                         .monospacedDigitSystemFont(ofSize: 10.5, weight: .medium), C_RUNNING)
             el.alignment = .right
             el.frame = NSRect(x: rightX, y: 22, width: rightW, height: 14)
             addSubview(el)
@@ -538,11 +684,23 @@ class RunRow: NSView {
             } else {
                 durText = runDuration(primary)
             }
-            let dur = lbl(durText, .systemFont(ofSize: 10), .secondaryLabelColor)
+            // Spell out non-success outcomes so state is readable without colour.
+            let concl = primary.conclusion ?? ""
+            let word: String? = ["failure": "Failed", "cancelled": "Cancelled", "skipped": "Skipped"][concl]
+            let failed = concl == "failure"
+            let dur = lbl(word.map { "\($0) \u{00B7} \(durText)" } ?? durText,
+                          .systemFont(ofSize: 10, weight: failed ? .semibold : .regular),
+                          failed ? C_FAILURE : .secondaryLabelColor)
             dur.alignment = .right
             dur.frame = NSRect(x: rightX, y: 6, width: rightW, height: 14)
             addSubview(dur)
         }
+
+        let lk = NSButton(frame: NSRect(x: w - linkW - copyW - 4, y: (ROW_H - 24) / 2, width: linkW, height: 24))
+        if let img = NSImage(systemSymbolName: "arrow.up.right.square", accessibilityDescription: "Open in GitHub") { lk.image = img }
+        lk.bezelStyle = .recessed; lk.isBordered = false; lk.imagePosition = .imageOnly
+        lk.target = self; lk.action = #selector(openURL); lk.toolTip = "Open run on GitHub"
+        addSubview(lk)
 
         let cp = NSButton(frame: NSRect(x: w - copyW - 4, y: (ROW_H - 24) / 2, width: copyW, height: 24))
         if let img = NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: "Copy URL") { cp.image = img }
@@ -554,6 +712,8 @@ class RunRow: NSView {
         sep.wantsLayer = true; sep.layer?.backgroundColor = NSColor.separatorColor.cgColor
         addSubview(sep)
     }
+
+    @objc func openURL() { if let u = URL(string: urlStr) { NSWorkspace.shared.open(u) } }
 
     func lbl(_ text: String, _ font: NSFont, _ color: NSColor = .labelColor) -> NSTextField {
         let l = NSTextField(labelWithString: text)
@@ -590,7 +750,7 @@ class RunRow: NSView {
         NSPasteboard.general.setString(urlStr, forType: .string)
         if let btn = sender as? NSButton,
            let img = NSImage(systemSymbolName: "checkmark", accessibilityDescription: nil) {
-            let orig = btn.image; btn.image = img; btn.contentTintColor = .systemGreen
+            let orig = btn.image; btn.image = img; btn.contentTintColor = C_SUCCESS
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { btn.image = orig; btn.contentTintColor = nil }
         }
     }
@@ -612,7 +772,7 @@ class RunRow: NSView {
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.15
             ctx.allowsImplicitAnimation = true
-            layer?.backgroundColor = nil
+            layer?.backgroundColor = restingColor
         }
     }
     override func mouseDown(with event: NSEvent) {
@@ -620,12 +780,12 @@ class RunRow: NSView {
     }
     override func mouseUp(with event: NSEvent) {
         NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.15; ctx.allowsImplicitAnimation = true; layer?.backgroundColor = nil
+            ctx.duration = 0.15; ctx.allowsImplicitAnimation = true; layer?.backgroundColor = restingColor
         }
         let loc = convert(event.locationInWindow, from: nil)
         guard bounds.contains(loc) else { return }
         for sub in subviews where sub is NSButton { if sub.frame.contains(loc) { return } }
-        if let url = URL(string: urlStr) { NSWorkspace.shared.open(url) }
+        onToggle?()
     }
 
     // Keyboard accessibility
@@ -636,9 +796,168 @@ class RunRow: NSView {
     }
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 36 || event.keyCode == 49 { // Return or Space
-            if let url = URL(string: urlStr) { NSWorkspace.shared.open(url) }
+            onToggle?()
         } else { super.keyDown(with: event) }
     }
+}
+
+// ─── Run Detail View ─────────────────────────────────────────────────────────
+
+// Inline expansion under a run row. Renders synchronously from the detail caches;
+// TabVC kicks off background fetches and rebuilds when data lands.
+class RunDetailView: Flipped {
+    let urlStr: String
+
+    init(group: [Run], primary: Run, repo: String, history: [Run], w: CGFloat) {
+        self.urlStr = primary.url
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.06).cgColor
+        let pad: CGFloat = 42, rPad: CGFloat = 16
+        let contentW = w - pad - rPad
+        var y: CGFloat = 10
+
+        func wrapped(_ text: String, _ font: NSFont, _ color: NSColor, maxH: CGFloat, indent: CGFloat = 0) {
+            let rect = (text as NSString).boundingRect(
+                with: NSSize(width: contentW - indent, height: maxH),
+                options: [.usesLineFragmentOrigin], attributes: [.font: font])
+            let h = min(ceil(rect.height) + 2, maxH)
+            let l = NSTextField(wrappingLabelWithString: text)
+            l.font = font; l.textColor = color
+            l.frame = NSRect(x: pad + indent, y: y, width: contentW - indent, height: h)
+            l.isSelectable = true
+            addSubview(l)
+            y += h + 4
+        }
+
+        func infoLine(_ name: String, _ value: String, _ valueColor: NSColor = .labelColor) {
+            let n = NSTextField(labelWithString: name)
+            n.font = .systemFont(ofSize: 10.5); n.textColor = .tertiaryLabelColor
+            n.frame = NSRect(x: pad, y: y, width: 80, height: 15)
+            addSubview(n)
+            let v = NSTextField(labelWithString: value)
+            v.font = .monospacedDigitSystemFont(ofSize: 10.5, weight: .medium); v.textColor = valueColor
+            v.frame = NSRect(x: pad + 84, y: y, width: contentW - 84, height: 15)
+            v.isSelectable = true
+            addSubview(v)
+            y += 17
+        }
+
+        func divider() {
+            let s = NSView(frame: NSRect(x: pad, y: y, width: contentW, height: 0.5))
+            s.wantsLayer = true; s.layer?.backgroundColor = NSColor.separatorColor.cgColor
+            addSubview(s); y += 7
+        }
+
+        // ── Full commit message ──
+        let cachedMsg = commitMsgCache[primary.headSha]
+        wrapped(cachedMsg ?? "Loading commit message\u{2026}",
+                .systemFont(ofSize: 11.5),
+                cachedMsg == nil ? .tertiaryLabelColor : .labelColor, maxH: 170)
+        y += 3
+        divider()
+
+        // ── Timing ──
+        let groupStart = group.compactMap { parseISO($0.startedAt) ?? parseISO($0.createdAt) }.min()
+        let allDone = group.allSatisfy { $0.status == "completed" }
+        let groupEnd = group.compactMap { parseISO($0.updatedAt) }.max()
+        if let s = groupStart { infoLine("Started", timestampFmt.string(from: s)) }
+        if allDone, let e = groupEnd {
+            infoLine("Completed", timestampFmt.string(from: e))
+            if let s = groupStart { infoLine("Duration", fmtDuration(e.timeIntervalSince(s))) }
+        } else {
+            infoLine("Elapsed", fmtDuration(runElapsed(primary)), C_RUNNING)
+        }
+        if let est = estimatedTotal(for: primary, history: history) {
+            infoLine("Expected", "~\(fmtDuration(est))")
+        }
+        y += 3
+        divider()
+
+        // ── Workflows ──
+        for run in group.prefix(8) {
+            let iv = NSImageView(frame: NSRect(x: pad, y: y + 1, width: 13, height: 13))
+            if let img = NSImage(systemSymbolName: sfName(run), accessibilityDescription: statusText(run)) {
+                iv.image = img; iv.contentTintColor = sfColor(run)
+                iv.symbolConfiguration = .init(pointSize: 9.5, weight: .semibold)
+            }
+            iv.toolTip = statusText(run)
+            addSubview(iv)
+            let name = NSTextField(labelWithString: "\(run.workflowName ?? run.name) #\(run.number)")
+            name.font = .systemFont(ofSize: 11); name.textColor = .labelColor
+            name.lineBreakMode = .byTruncatingTail; name.maximumNumberOfLines = 1
+            name.frame = NSRect(x: pad + 19, y: y, width: contentW - 19 - 155, height: 15)
+            addSubview(name)
+            let stText: String
+            switch run.status {
+            case "completed": stText = "\(statusText(run)) \u{00B7} \(runDuration(run))"
+            case "in_progress": stText = "\(fmtDuration(runElapsed(run))) elapsed"
+            default: stText = statusText(run)
+            }
+            let st = NSTextField(labelWithString: stText)
+            st.font = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
+            st.textColor = run.conclusion == "failure" ? C_FAILURE : .secondaryLabelColor
+            st.alignment = .right
+            st.frame = NSRect(x: pad + contentW - 150, y: y, width: 150, height: 15)
+            addSubview(st)
+            y += 18
+        }
+        if group.count > 8 {
+            wrapped("+ \(group.count - 8) more workflows", .systemFont(ofSize: 10), .tertiaryLabelColor, maxH: 14)
+        }
+
+        // ── Failure details ──
+        let failedRuns = group.filter { $0.conclusion == "failure" }
+        if !failedRuns.isEmpty {
+            y += 2
+            divider()
+            let hdr = NSTextField(labelWithString: "WHY IT FAILED")
+            hdr.font = .systemFont(ofSize: 9.5, weight: .bold); hdr.textColor = C_FAILURE
+            hdr.frame = NSRect(x: pad, y: y, width: contentW, height: 13)
+            addSubview(hdr); y += 18
+            for run in failedRuns.prefix(3) {
+                if group.count > 1 {
+                    wrapped(run.workflowName ?? run.name, .systemFont(ofSize: 10.5, weight: .semibold),
+                            .labelColor, maxH: 16)
+                }
+                if let fails = failureCache[run.id] {
+                    if fails.isEmpty {
+                        wrapped("No failure annotations \u{2014} open the run on GitHub for full logs.",
+                                .systemFont(ofSize: 10.5), .secondaryLabelColor, maxH: 30)
+                    }
+                    for f in fails {
+                        let head = f.step.map { "\(f.job) \u{00B7} \($0)" } ?? f.job
+                        wrapped(head, .systemFont(ofSize: 10.5, weight: .semibold), C_FAILURE, maxH: 32)
+                        if f.messages.isEmpty {
+                            wrapped("No annotation message \u{2014} see logs on GitHub.",
+                                    .systemFont(ofSize: 10), .secondaryLabelColor, maxH: 14, indent: 10)
+                        }
+                        for m in f.messages {
+                            wrapped(m, .monospacedSystemFont(ofSize: 10, weight: .regular),
+                                    .labelColor, maxH: 110, indent: 10)
+                        }
+                    }
+                } else {
+                    wrapped("Fetching failure details\u{2026}", .systemFont(ofSize: 10.5),
+                            .tertiaryLabelColor, maxH: 16)
+                }
+            }
+        }
+
+        // ── GitHub link ──
+        y += 4
+        let gh = NSButton(title: "View on GitHub", target: self, action: #selector(openGH))
+        gh.bezelStyle = .inline; gh.font = .systemFont(ofSize: 11, weight: .medium)
+        gh.contentTintColor = .linkColor
+        gh.frame = NSRect(x: pad, y: y, width: 130, height: 22)
+        addSubview(gh)
+        y += 32
+
+        frame = NSRect(x: 0, y: 0, width: w, height: y)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    @objc func openGH() { if let u = URL(string: urlStr) { NSWorkspace.shared.open(u) } }
 }
 
 // ─── PR Row View ─────────────────────────────────────────────────────────────
@@ -670,12 +989,14 @@ class PRRow: NSView {
             iv.image = img; iv.contentTintColor = prReviewColor(pr)
             iv.symbolConfiguration = .init(pointSize: 14, weight: .semibold)
         }
+        iv.toolTip = reviewDesc
         addSubview(iv)
 
         // Title
-        let title = lbl(String(pr.title.prefix(70)), .systemFont(ofSize: 12.5, weight: .semibold))
+        let title = lbl(pr.title, .systemFont(ofSize: 12.5, weight: .semibold))
         title.frame = NSRect(x: textX, y: PR_ROW_H - 24, width: textW, height: 18)
         title.lineBreakMode = .byTruncatingTail
+        title.toolTip = pr.title
         addSubview(title)
 
         // Subtitle: #number by author + branch (bold number)
@@ -694,9 +1015,8 @@ class PRRow: NSView {
         sub.lineBreakMode = .byTruncatingTail; sub.maximumNumberOfLines = 1
         addSubview(sub)
 
-        // Branch badge
-        let branchText = String(pr.headRefName.prefix(18))
-        let badge = Badge(branchText)
+        // Branch badge — middle truncation + tooltip instead of a hard prefix cut
+        let badge = Badge(pr.headRefName, maxWidth: textW * 0.5 - 8)
         badge.frame.origin = NSPoint(x: textX + textW * 0.5, y: 8)
         addSubview(badge)
 
@@ -845,11 +1165,11 @@ class PRDetailView: NSView {
         let btnH: CGFloat = 24
         var bx: CGFloat = pad
 
-        let approveBtn = makeBtn("Approve", color: .systemGreen, x: bx, y: y, h: btnH)
+        let approveBtn = makeBtn("Approve", color: C_SUCCESS, x: bx, y: y, h: btnH)
         approveBtn.target = self; approveBtn.action = #selector(doApprove)
         addSubview(approveBtn); bx += approveBtn.frame.width + 6
 
-        let changesBtn = makeBtn("Changes", color: .systemOrange, x: bx, y: y, h: btnH)
+        let changesBtn = makeBtn("Changes", color: C_QUEUED, x: bx, y: y, h: btnH)
         changesBtn.target = self; changesBtn.action = #selector(doRequestChanges)
         addSubview(changesBtn); bx += changesBtn.frame.width + 6
 
@@ -862,7 +1182,7 @@ class PRDetailView: NSView {
         mergeBtn.target = self; mergeBtn.action = #selector(doMerge)
         addSubview(mergeBtn); bx += mergeBtn.frame.width + 6
 
-        let closeBtn = makeBtn("Close", color: .systemRed, x: bx, y: y, h: btnH)
+        let closeBtn = makeBtn("Close", color: C_FAILURE, x: bx, y: y, h: btnH)
         closeBtn.target = self; closeBtn.action = #selector(doClose(_:))
         closeBtn.tag = 200
         addSubview(closeBtn)
@@ -935,11 +1255,11 @@ class PRDetailView: NSView {
         } else {
             confirmingClose = true
             sender.title = "Sure?"; sender.contentTintColor = .white
-            sender.layer?.backgroundColor = NSColor.systemRed.cgColor; sender.layer?.cornerRadius = 4
+            sender.layer?.backgroundColor = C_FAILURE.cgColor; sender.layer?.cornerRadius = 4
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
                 guard let self = self, self.confirmingClose else { return }
                 self.confirmingClose = false
-                sender.title = "Close"; sender.contentTintColor = .systemRed
+                sender.title = "Close"; sender.contentTintColor = C_FAILURE
                 sender.layer?.backgroundColor = nil
             }
         }
@@ -950,11 +1270,12 @@ class PRDetailView: NSView {
 
 class Badge: NSView {
     let text: String
-    init(_ text: String) {
+    init(_ text: String, maxWidth: CGFloat = .greatestFiniteMagnitude) {
         self.text = text
         let a: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedSystemFont(ofSize: 10, weight: .medium)]
         let sz = (text as NSString).size(withAttributes: a)
-        super.init(frame: NSRect(x: 0, y: 0, width: sz.width + 14, height: 20))
+        super.init(frame: NSRect(x: 0, y: 0, width: min(sz.width + 14, maxWidth), height: 20))
+        toolTip = text
     }
     required init?(coder: NSCoder) { fatalError() }
     override func draw(_ dirtyRect: NSRect) {
@@ -964,12 +1285,18 @@ class Badge: NSView {
         // dark fill in light mode, light fill in dark mode.
         NSColor.labelColor.withAlphaComponent(0.08).setFill(); p.fill()
         NSColor.separatorColor.setStroke(); p.lineWidth = 0.5; p.stroke()
+        // Middle truncation keeps both ends of long branch names readable.
+        let ps = NSMutableParagraphStyle()
+        ps.lineBreakMode = .byTruncatingMiddle; ps.alignment = .center
         let a: [NSAttributedString.Key: Any] = [
             .font: NSFont.monospacedSystemFont(ofSize: 10, weight: .medium),
             .foregroundColor: NSColor.secondaryLabelColor,
+            .paragraphStyle: ps,
         ]
         let sz = (text as NSString).size(withAttributes: a)
-        (text as NSString).draw(at: NSPoint(x: (bounds.width - sz.width) / 2, y: (bounds.height - sz.height) / 2), withAttributes: a)
+        let textRect = NSRect(x: 7, y: (bounds.height - sz.height) / 2,
+                              width: bounds.width - 14, height: sz.height)
+        (text as NSString).draw(in: textRect, withAttributes: a)
     }
 }
 
@@ -1091,8 +1418,10 @@ class TabVC: NSViewController {
     var selectedTab: Int
     var selectedRepo: String?
     var expandedPR: String?
+    var expandedRun: String?
     var scrollView: NSScrollView!
     var doc: Flipped!
+    var footerView: NSView!
 
     init(grouped: [(String, [Run])], prGrouped: [(String, [PR])], updated: Date, loading: Bool,
          tab: Int, repo: String?, expandedPR: String? = nil) {
@@ -1154,19 +1483,10 @@ class TabVC: NSViewController {
         scrollView.documentView = doc
         container.addSubview(scrollView)
 
-        rebuildContent()
-
-        // Size the popover based on content
-        let contentH = doc.frame.height
-        let visScrollH = min(contentH, scrollH)
-        let totalH = TAB_H + visScrollH + FTR_H
-        scrollView.frame.size.height = visScrollH
-        footer.frame.origin.y = TAB_H + visScrollH
         container.addSubview(footer)
-        container.frame.size.height = totalH
-
+        footerView = footer
         self.view = container
-        self.preferredContentSize = NSSize(width: w, height: totalH)
+        rebuildContent()
     }
 
     func rebuildContent() {
@@ -1185,6 +1505,20 @@ class TabVC: NSViewController {
         var y: CGFloat = 0
         for row in rows { row.frame.origin = NSPoint(x: 0, y: y); doc.addSubview(row); y += row.frame.height }
         doc.frame.size.height = max(y, 60)
+        relayout()
+    }
+
+    // Resize the scroll area / footer / popover to fit the content, so inline
+    // expansions grow the popover instead of forcing a scroll.
+    func relayout() {
+        guard footerView != nil else { return }
+        let scrollHMax = POP_MAX_H - TAB_H - FTR_H
+        let visScrollH = min(doc.frame.height, scrollHMax)
+        scrollView.frame.size.height = visScrollH
+        footerView.frame.origin.y = TAB_H + visScrollH
+        let totalH = TAB_H + visScrollH + FTR_H
+        view.frame.size.height = totalH
+        preferredContentSize = NSSize(width: POP_W, height: totalH)
     }
 
     func filteredGrouped() -> [(String, [Run])] {
@@ -1234,12 +1568,53 @@ class TabVC: NSViewController {
                     else { indexByKey[key] = groups.count; groups.append([run]) }
                 }
                 for group in groups {
-                    rows.append(RunRow(group: group, history: visible, w: w))
+                    let primary = RunRow.pickPrimary(group)
+                    let key = primary.url
+                    let isExpanded = expandedRun == key
+                    let row = RunRow(group: group, history: visible, w: w, expanded: isExpanded)
+                    row.onToggle = { [weak self] in
+                        guard let self = self else { return }
+                        self.expandedRun = self.expandedRun == key ? nil : key
+                        self.rebuildContent()
+                    }
+                    rows.append(row)
+                    if isExpanded {
+                        ensureRunDetail(repo: repo, group: group, key: key)
+                        rows.append(RunDetailView(group: group, primary: primary, repo: repo,
+                                                  history: visible, w: w))
+                    }
                 }
             }
         }
         if rows.isEmpty { rows.append(EmptyRow("No actions to show", w: w)) }
         return rows
+    }
+
+    // Fetch commit message + failure annotations for an expanded run in the
+    // background, then re-render. Results are cached so re-expanding is instant.
+    func ensureRunDetail(repo: String, group: [Run], key: String) {
+        let primary = RunRow.pickPrimary(group)
+        let sha = primary.headSha
+        let needMsg = !sha.isEmpty && commitMsgCache[sha] == nil
+        let needFails = group.filter { $0.conclusion == "failure" && failureCache[$0.id] == nil }
+        guard needMsg || !needFails.isEmpty else { return }
+        guard !detailFetchInFlight.contains(key) else { return }
+        detailFetchInFlight.insert(key)
+        let fallbackMsg = primary.displayTitle
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let msg = needMsg ? fetchCommitMessage(repo: repo, sha: sha) : nil
+            var fails: [(Int, [RunFailure])] = []
+            for r in needFails { fails.append((r.id, fetchRunFailures(repo: repo, runId: r.id))) }
+            DispatchQueue.main.async {
+                if commitMsgCache.count > 300 { commitMsgCache.removeAll() }
+                if failureCache.count > 200 { failureCache.removeAll() }
+                if needMsg { commitMsgCache[sha] = msg ?? fallbackMsg }
+                for (id, f) in fails { failureCache[id] = f }
+                detailFetchInFlight.remove(key)
+                guard let self = self, self.expandedRun == key else { return }
+                self.rebuildContent()
+            }
+        }
     }
 
     func buildPRContent(_ w: CGFloat) -> [NSView] {
@@ -1288,6 +1663,7 @@ class TabVC: NSViewController {
         selectedTab = sender.selectedSegment
         (NSApp.delegate as? GHActionsBar)?.selectedTab = selectedTab
         expandedPR = nil
+        expandedRun = nil
         // Rebuild the whole view so the checkbox shows/hides with the tab.
         loadView()
     }
@@ -1307,6 +1683,7 @@ class TabVC: NSViewController {
         }
         (NSApp.delegate as? GHActionsBar)?.selectedRepo = selectedRepo
         expandedPR = nil
+        expandedRun = nil
         rebuildContent()
     }
 }
@@ -1712,18 +2089,18 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
     // MARK: - Icon
 
     func updateIcon() {
-        let color = overallColor(grouped)
-        let active = hasActive(grouped)
-        if active { startAnimation(color) }
+        let (color, badge, label) = overallStatus(grouped)
+        statusItem.button?.toolTip = "Cat Eye \u{2014} \(label)"
+        if hasActive(grouped) { startAnimation(color, badge: badge) }
         else {
             stopAnimation()
-            statusItem.button?.image = tintedIcon(ghIcon, color)
+            statusItem.button?.image = statusBadgedIcon(ghIcon, color: color, badge: badge)
             statusItem.button?.alphaValue = 1.0
         }
     }
 
-    func startAnimation(_ color: NSColor) {
-        statusItem.button?.image = tintedIcon(ghIcon, color)
+    func startAnimation(_ color: NSColor, badge: String?) {
+        statusItem.button?.image = statusBadgedIcon(ghIcon, color: color, badge: badge)
         guard animTimer == nil else { return }
         animPhase = 0
         animTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { [weak self] _ in
