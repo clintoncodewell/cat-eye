@@ -1,12 +1,16 @@
 # Cat Eye — GitHub Actions & PR Monitor for macOS
 
-> A lightweight, native macOS menu bar app for monitoring GitHub Actions CI/CD status and pull request reviews. Open source, 225KB, zero Electron.
+> A lightweight, native macOS menu bar app for monitoring GitHub Actions CI/CD status and pull request reviews. Open source, ~320KB, accessible, zero Electron.
 
 The octocat's eye never blinks.
 
 **There are plenty of GitHub status apps out there.** Most are Electron wrappers that eat 200MB+ of RAM to show you a green checkmark. Cat Eye exists because a status indicator shouldn't cost more than the IDE it sits next to.
 
-This is a **native macOS menu bar app** — a single 225KB Swift binary, ~31MB RSS, zero frameworks beyond AppKit. It does one thing: shows you whether your GitHub Actions are passing and your PRs need attention. No dashboard, no analytics, no features you'll never use. Just a colored icon that turns red when something breaks.
+Cat Eye is built on three principles:
+
+- **Extremely low footprint** — a single ~320KB Swift binary, ~35MB of RAM, zero frameworks beyond AppKit. No runtime, no bundled browser, no background bloat.
+- **Minimalist** — just the important information: are your Actions passing, and do any PRs need your review. No dashboard, no analytics, no features you'll never use.
+- **Accessible** — colour is never the only signal. Status uses the Okabe-Ito colour-blind-safe palette plus shape and text cues, and everything is keyboard navigable.
 
 | Actions tab | Pull Requests tab |
 |:-----------:|:-----------------:|
@@ -43,7 +47,7 @@ This is a **native macOS menu bar app** — a single 225KB Swift binary, ~31MB R
 - **Hot-reload config** — change tracked repos from settings without restarting
 - **Auto-detects `gh` CLI** — finds your GitHub CLI install automatically
 - **Error feedback** — clear messages when gh CLI is missing, auth fails, or API errors occur
-- **Tiny footprint** — 225KB binary, ~31MB memory, zero dependencies beyond macOS
+- **Tiny footprint** — ~320KB binary, ~35MB memory, zero dependencies beyond macOS
 
 ## Requirements
 
@@ -215,8 +219,8 @@ Prioritizes **deploy** and **smoke test** workflows for overall status, so Depen
 
 | | Cat Eye | Typical Electron app |
 |---|---|---|
-| **Binary** | 225 KB | 150–300 MB |
-| **Memory** | ~31 MB (0.2%) | 200–400 MB |
+| **Binary** | ~320 KB | 150–300 MB |
+| **Memory** | ~35 MB (0.2%) | 200–400 MB |
 | **CPU at idle** | 0% | 0.5–2% |
 | **Dependencies** | macOS + `gh` CLI | Node.js, Chromium, npm packages |
 | **Startup** | Instant | 2–5 seconds |
@@ -229,8 +233,8 @@ Cat Eye is a single Swift file compiled to a native binary. No runtime, no garba
 |---|---|
 | **Process name** | `cat-eye` |
 | **Spotlight name** | Cat Eye |
-| **Binary size** | ~225KB |
-| **Memory** | ~31 MB / 0.2% on 16GB Mac |
+| **Binary size** | ~320KB |
+| **Memory** | ~35 MB / 0.2% on 16GB Mac |
 | **Bundle ID** | `com.clintoncodewell.cat-eye` |
 
 ## Contributing
