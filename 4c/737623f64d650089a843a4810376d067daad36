@@ -1,0 +1,23 @@
+main.swift
+  s_005a392e9de050::t_e78ad5a4c90305 37-39,129,135-144,195-199,235,239,241,244,246,248,250-254,1156,1268-1271,1313-1317,1319-1320,1507-1512,1670
+build.sh
+  s_005a392e9de050::t_b5ffd7467a7601 5
+CatEye.app/Contents/Info.plist
+  s_005a392e9de050::t_7a8aacf4dedc6a 15-16
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "4c737623f64d650089a843a4810376d067daad36",
+  "prompts": {},
+  "sessions": {
+    "s_005a392e9de050": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "32e7f587-a9a2-47e9-af3a-83dbc9ec043c",
+        "model": "unknown"
+      },
+      "human_author": "Ubuntu <azureuser@clinton-dev-vm.tail405bf7.ts.net>"
+    }
+  }
+}
