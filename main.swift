@@ -34,9 +34,9 @@ func loadConfig() {
     guard let data = FileManager.default.contents(atPath: CONFIG_PATH),
           let c = try? JSONDecoder().decode(AppConfig.self, from: data) else { return }
     REPOS = c.repos.filter { isValidRepo($0) }
-    POLL_NORMAL = c.pollInterval ?? 30
-    POLL_ACTIVE = c.pollActiveInterval ?? 10
-    RUNS_PER_REPO = c.runsPerRepo ?? 10
+    POLL_NORMAL = max(5, c.pollInterval ?? 30)
+    POLL_ACTIVE = max(5, c.pollActiveInterval ?? 10)
+    RUNS_PER_REPO = min(max(1, c.runsPerRepo ?? 10), 100)
     FILTER_DEFAULT_BRANCHES = c.filterDefaultBranches ?? false
 }
 
@@ -126,12 +126,22 @@ struct PR: Decodable {
     let body: String?
 }
 
-enum PRAction {
+enum PRAction: CustomStringConvertible {
     case approve(String?)
     case requestChanges(String)
     case comment(String)
     case merge(String)   // "-m", "-r", "-s"
     case close
+
+    var description: String {
+        switch self {
+        case .approve: return "approve"
+        case .requestChanges: return "request-changes"
+        case .comment: return "comment"
+        case .merge(let m): return "merge(\(m))"
+        case .close: return "close"
+        }
+    }
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -182,6 +192,11 @@ func ghShell(_ args: String...) -> Data? {
 }
 
 func ghStr(_ args: String...) -> String? {
+    guard FileManager.default.isExecutableFile(atPath: GH) else {
+        let msg = "GitHub CLI not found at \(GH)"
+        log.error("\(msg)"); lastFetchError = msg
+        return nil
+    }
     let proc = Process()
     proc.executableURL = URL(fileURLWithPath: GH)
     proc.arguments = Array(args)
@@ -217,21 +232,26 @@ func fetchPRs(repo: String) -> [PR] {
 func executePRAction(repo: String, number: Int, action: PRAction, completion: @escaping () -> Void) {
     DispatchQueue.global(qos: .userInitiated).async {
         let n = "\(number)", r = repo
+        var ok = true
         switch action {
         case .approve(let body):
             if let b = body, !b.isEmpty {
-                _ = ghShell("pr", "review", "--approve", "-b", b, "-R", r, n)
+                ok = ghShell("pr", "review", "--approve", "-b", b, "-R", r, n) != nil
             } else {
-                _ = ghShell("pr", "review", "--approve", "-R", r, n)
+                ok = ghShell("pr", "review", "--approve", "-R", r, n) != nil
             }
         case .requestChanges(let body):
-            _ = ghShell("pr", "review", "--request-changes", "-b", body, "-R", r, n)
+            ok = ghShell("pr", "review", "--request-changes", "-b", body, "-R", r, n) != nil
         case .comment(let body):
-            _ = ghShell("pr", "comment", "-b", body, "-R", r, n)
+            ok = ghShell("pr", "comment", "-b", body, "-R", r, n) != nil
         case .merge(let method):
-            _ = ghShell("pr", "merge", method, "-R", r, n)
+            ok = ghShell("pr", "merge", method, "-R", r, n) != nil
         case .close:
-            _ = ghShell("pr", "close", "-R", r, n)
+            ok = ghShell("pr", "close", "-R", r, n) != nil
+        }
+        // ghShell sets lastFetchError on failure; surface it via the PR tab's error banner.
+        if !ok {
+            log.warning("PR action \(action) for \(r)#\(number) failed: \(lastFetchError ?? "unknown")")
         }
         DispatchQueue.main.async { completion() }
     }
@@ -1133,7 +1153,7 @@ class TabVC: NSViewController {
         let repoFilter = NSPopUpButton(frame: NSRect(x: w - 200, y: 6, width: 188, height: 24), pullsDown: false)
         repoFilter.font = .systemFont(ofSize: 11)
         repoFilter.addItem(withTitle: "All Repos")
-        for repo in REPOS { repoFilter.addItem(withTitle: repo.components(separatedBy: "/").last ?? repo) }
+        for repo in REPOS { repoFilter.addItem(withTitle: repo) }
         if let sel = selectedRepo, let idx = REPOS.firstIndex(of: sel) { repoFilter.selectItem(at: idx + 1) }
         else { repoFilter.selectItem(at: 0) }
         repoFilter.target = self; repoFilter.action = #selector(repoChanged(_:))
@@ -1245,6 +1265,10 @@ class TabVC: NSViewController {
     func buildPRContent(_ w: CGFloat) -> [NSView] {
         var rows: [NSView] = []
         let data = filteredPRs()
+        if let err = lastFetchError {
+            rows.append(EmptyRow(err, w: w, icon: "exclamationmark.triangle"))
+            return rows
+        }
         let hasPRs = data.contains { !$0.1.isEmpty }
         if !hasPRs {
             rows.append(EmptyRow("No pull requests awaiting your review", w: w, icon: "checkmark.seal"))
@@ -1286,10 +1310,14 @@ class TabVC: NSViewController {
 
     @objc func tabChanged(_ sender: NSSegmentedControl) {
         selectedTab = sender.selectedSegment
-        (NSApp.delegate as? GHActionsBar)?.selectedTab = selectedTab
+        // Reassigning contentViewController is what NSPopover observes at show time;
+        // calling loadView() alone leaves stale tab body visible in an already-shown popover.
+        let appDel = NSApp.delegate as? GHActionsBar
+        appDel?.selectedTab = selectedTab
+        appDel?.selectedRepo = selectedRepo
         expandedPR = nil
-        // Rebuild the whole view so the checkbox shows/hides with the tab.
-        loadView()
+        appDel?.applySystemAppearance()
+        appDel?.buildWithAppearance { appDel?.popover.contentViewController = appDel?.makeTabVC() }
     }
 
     @objc func toggleBranchFilter(_ sender: NSButton) {
@@ -1476,7 +1504,12 @@ class SettingsVC: NSViewController {
             ]))
             sl.attributedStringValue = attr
         } else {
-            sl.stringValue = "Not authenticated — click Login"
+            // Distinguish "gh CLI missing" (infra) from "not authenticated" (user action).
+            if let err = lastFetchError, err.contains("not found") {
+                sl.stringValue = err
+            } else {
+                sl.stringValue = "Not authenticated — click Login"
+            }
             sl.textColor = .systemRed
         }
     }
@@ -1634,8 +1667,7 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
             // First run: open popover with settings
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 self.closeTime = .distantPast
-                self.showSettings()
-                self.toggle()
+                self.showSettings()   // opens + shows the popover itself
             }
         } else {
             refresh()
