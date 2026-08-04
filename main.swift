@@ -1,4 +1,5 @@
 import Cocoa
+import QuartzCore
 import UserNotifications
 import os
 
@@ -172,9 +173,19 @@ func ghShell(_ args: String...) -> Data? {
     proc.standardError = errPipe
     do {
         try proc.run()
+        // Drain both pipes BEFORE waiting: a child that fills a 64KB pipe buffer
+        // would otherwise block forever inside waitUntilExit, stranding a worker
+        // thread per poll while new refreshes keep stacking up.
+        var errData = Data()
+        let errDone = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .utility).async {
+            errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+            errDone.signal()
+        }
+        let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
+        errDone.wait()
         proc.waitUntilExit()
         guard proc.terminationStatus == 0 else {
-            let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
             let errStr = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             log.warning("gh \(args.joined(separator: " ")) exited \(proc.terminationStatus): \(errStr)")
             if errStr.contains("auth") || errStr.contains("login") {
@@ -185,7 +196,7 @@ func ghShell(_ args: String...) -> Data? {
             return nil
         }
         lastFetchError = nil
-        return outPipe.fileHandleForReading.readDataToEndOfFile()
+        return outData
     } catch {
         log.error("Failed to launch gh: \(error.localizedDescription)")
         lastFetchError = "Failed to run gh: \(error.localizedDescription)"
@@ -208,9 +219,11 @@ func ghStr(_ args: String...) -> String? {
     proc.standardError = FileHandle.nullDevice
     do {
         try proc.run()
+        // Read to EOF before waiting so large outputs can't deadlock the pipe.
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
         proc.waitUntilExit()
         guard proc.terminationStatus == 0 else { return nil }
-        let s = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+        let s = String(data: data, encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return s?.isEmpty == false ? s : nil
     } catch { return nil }
@@ -2450,8 +2463,9 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
     var statusItem: NSStatusItem!
     var popover: NSPopover!
     var timer: Timer?
-    var animTimer: Timer?
-    var animPhase: CGFloat = 0
+    var isPulsing = false
+    var refreshInFlight = false
+    var lastPRRefresh = Date.distantPast
     var grouped: [(String, [Run])] = []
     var prGrouped: [(String, [PR])] = []
     var lastUpdate = Date()
@@ -2521,11 +2535,22 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
         timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             self?.refresh()
         }
+        // Generous tolerance lets the system coalesce wakeups (and App Nap us)
+        // instead of firing on an exact-deadline timer.
+        timer?.tolerance = interval * 0.2
     }
 
-    func refresh(completion: (() -> Void)? = nil) {
+    func refresh(force: Bool = false, completion: (() -> Void)? = nil) {
         guard !REPOS.isEmpty else { completion?(); return }
+        // Never let refreshes overlap: a slow network poll that outlives the timer
+        // interval would otherwise stack concurrent gh-process storms.
+        guard !refreshInFlight else { completion?(); return }
+        refreshInFlight = true
         let repos = REPOS  // snapshot on calling thread
+        // PRs don't need the fast active-poll cadence — refresh them on the
+        // normal interval (or on demand), halving subprocess spawns while runs
+        // are in progress.
+        let includePRs = force || Date().timeIntervalSince(lastPRRefresh) >= POLL_NORMAL * 0.9
         let start = Date()
         log.debug("Refresh starting for \(repos.count) repos")
         DispatchQueue.global(qos: .utility).async { [weak self] in
@@ -2533,22 +2558,22 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
             var runRes = Array(repeating: (String, [Run])("", []), count: repos.count)
             var prRes = Array(repeating: (String, [PR])("", []), count: repos.count)
             let collectQ = DispatchQueue(label: "com.clintoncodewell.cat-eye.collect")
-            let group = DispatchGroup()
+            var tasks: [() -> Void] = []
             for (i, repo) in repos.enumerated() {
-                group.enter()
-                DispatchQueue.global(qos: .utility).async {
+                tasks.append {
                     let runs = fetchRuns(repo: repo)
                     collectQ.sync { runRes[i] = (repo, runs) }
-                    group.leave()
                 }
-                group.enter()
-                DispatchQueue.global(qos: .utility).async {
-                    let prs = fetchPRs(repo: repo)
-                    collectQ.sync { prRes[i] = (repo, prs) }
-                    group.leave()
+                if includePRs {
+                    tasks.append {
+                        let prs = fetchPRs(repo: repo)
+                        collectQ.sync { prRes[i] = (repo, prs) }
+                    }
                 }
             }
-            group.wait()
+            // concurrentPerform caps parallelism at the core count, so many repos
+            // no longer launch an unbounded burst of simultaneous gh processes.
+            DispatchQueue.concurrentPerform(iterations: tasks.count) { tasks[$0]() }
             let elapsed = Date().timeIntervalSince(start)
             let totalRuns = runRes.reduce(0) { $0 + $1.1.count }
             let totalPRs = prRes.reduce(0) { $0 + $1.1.count }
@@ -2557,9 +2582,13 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
                 self.detectTransitions(runRes)
                 DeployLog.shared.record(runRes)
                 self.grouped = runRes
-                self.prGrouped = prRes
+                if includePRs {
+                    self.prGrouped = prRes
+                    self.lastPRRefresh = Date()
+                }
                 self.lastUpdate = Date()
                 self.firstLoad = false
+                self.refreshInFlight = false
                 self.updateIcon()
                 self.scheduleTimer()
                 completion?()
@@ -2572,7 +2601,7 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
         firstLoad = true
         grouped = []
         popover.close()
-        refresh { [weak self] in
+        refresh(force: true) { [weak self] in
             guard let self = self else { return }
             self.closeTime = .distantPast
             self.toggle()
@@ -2589,23 +2618,33 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
         else {
             stopAnimation()
             statusItem.button?.image = statusBadgedIcon(ghIcon, color: color, badge: badge)
-            statusItem.button?.alphaValue = 1.0
         }
     }
 
     func startAnimation(_ color: NSColor, badge: String?) {
-        statusItem.button?.image = statusBadgedIcon(ghIcon, color: color, badge: badge)
-        guard animTimer == nil else { return }
-        animPhase = 0
-        animTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { [weak self] _ in
-            guard let self = self, let btn = self.statusItem.button else { return }
-            self.animPhase += 0.15
-            // Smooth 2-second breathing cycle (~7fps, sufficient for 18px icon)
-            btn.alphaValue = CGFloat(0.4 + 0.6 * (0.5 + 0.5 * sin(self.animPhase * .pi)))
-        }
+        guard let btn = statusItem.button else { return }
+        btn.image = statusBadgedIcon(ghIcon, color: color, badge: badge)
+        guard !isPulsing else { return }
+        isPulsing = true
+        // Breathing pulse via Core Animation: runs entirely in the render server,
+        // so the app never wakes per frame (the old 0.15s Timer redrew the status
+        // item ~7×/sec for as long as any action was running).
+        btn.wantsLayer = true
+        let pulse = CABasicAnimation(keyPath: "opacity")
+        pulse.fromValue = 1.0
+        pulse.toValue = 0.4
+        pulse.duration = 1.0
+        pulse.autoreverses = true
+        pulse.repeatCount = .infinity
+        pulse.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        btn.layer?.add(pulse, forKey: "cat-eye.pulse")
     }
 
-    func stopAnimation() { animTimer?.invalidate(); animTimer = nil }
+    func stopAnimation() {
+        guard isPulsing else { return }
+        isPulsing = false
+        statusItem.button?.layer?.removeAnimation(forKey: "cat-eye.pulse")
+    }
 
     // MARK: - Notifications
 
@@ -2739,7 +2778,7 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
 
     @objc func doRefresh() {
         popover.close()
-        refresh { [weak self] in
+        refresh(force: true) { [weak self] in
             guard let self = self else { return }
             self.closeTime = .distantPast
             self.toggle()
