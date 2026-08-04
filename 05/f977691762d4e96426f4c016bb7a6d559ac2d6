@@ -1,0 +1,45 @@
+main.swift
+  s_b3cdad28f7a69b::t_3acd5b9666e5b8 2380-2381
+  s_112852041cf7ad::t_c39f5c23d45245 1658
+  s_b3cdad28f7a69b::t_ca03ea06e7e3db 1560,1562,1568,1572
+  s_112852041cf7ad::t_b422a95defd9fd 394-399
+  s_b3cdad28f7a69b::t_e0de4d434a0815 1729-1761
+  s_b3cdad28f7a69b::t_632d2956f3b5fe 1625,1627-1628
+  s_b3cdad28f7a69b::t_96c623c28f858c 1341-1490
+  s_b3cdad28f7a69b::t_3825e4f17692d1 2179
+  s_112852041cf7ad::t_2af13bf94da51f 2206-2208
+  s_b3cdad28f7a69b::t_552a4fef13e343 400-667
+  s_be44926bd2214f::t_1cfb337cf015cf 1784
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.20",
+  "base_commit_sha": "05f977691762d4e96426f4c016bb7a6d559ac2d6",
+  "prompts": {},
+  "sessions": {
+    "s_112852041cf7ad": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e4d20cbb-f945-41c7-848d-6f6db0452c13",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Clinton Cunningham <188536720+clintoncodewell@users.noreply.github.com>"
+    },
+    "s_b3cdad28f7a69b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0993eec5-391d-43ea-bc2a-0b7012634bf0",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Clinton Cunningham <188536720+clintoncodewell@users.noreply.github.com>"
+    },
+    "s_be44926bd2214f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "b4b27894-8348-4e68-a016-c422f8c15718",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Clinton Cunningham <188536720+clintoncodewell@users.noreply.github.com>"
+    }
+  }
+}
