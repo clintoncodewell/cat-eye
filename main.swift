@@ -502,6 +502,13 @@ func visibleRuns(_ runs: [Run]) -> [Run] {
     FILTER_DEFAULT_BRANCHES ? runs.filter { DEFAULT_BRANCHES.contains($0.headBranch) } : runs
 }
 
+// Every consumer of "is anything running" must go through this. The poll cadence
+// included: a hidden feature-branch run polling every 10s behind an idle-looking
+// icon is exactly the drain the render-server pulse rewrite set out to remove.
+func visibleGrouped(_ g: [(String, [Run])]) -> [(String, [Run])] {
+    g.map { ($0.0, visibleRuns($0.1)) }
+}
+
 // ─── Deploy Log & Weekly Report ──────────────────────────────────────────────
 // Append-only history of every completed workflow run we witness while polling.
 // Costs no extra gh calls — it reuses data already fetched each refresh. Feeds the
@@ -767,6 +774,22 @@ func runSelfTest() {
     check(ins.contains { $0.contains("failure source") }, "failure insight present")
     let md = buildAIReport(this: tw, last: computeWindow(lastR), insights: ins, thisRecs: thisR)
     check(md.contains("Weekly Deploy Report") && md.contains("Failed runs"), "markdown")
+
+    // The visibility rule the icon AND the poll cadence both depend on.
+    func run(_ branch: String, _ status: String) -> Run {
+        Run(id: 1, name: "ci", displayTitle: "t", status: status, conclusion: nil,
+            headBranch: branch, headSha: "s", event: "push", url: "u/\(branch)",
+            updatedAt: "", createdAt: "", startedAt: nil, number: 1,
+            workflowName: "ci", actorLogin: nil)
+    }
+    let g = [("o/r", [run("feature-x", "in_progress"), run("main", "completed")])]
+    FILTER_DEFAULT_BRANCHES = false
+    check(hasActive(visibleGrouped(g)), "unfiltered: feature-branch run is active")
+    FILTER_DEFAULT_BRANCHES = true
+    check(visibleGrouped(g)[0].1.count == 1, "filtered: only default-branch rows visible")
+    check(!hasActive(visibleGrouped(g)), "filtered: hidden run must not force the fast poll")
+    FILTER_DEFAULT_BRANCHES = false
+
     print("SELFTEST OK — \(ins.count) insights, report \(md.count) chars")
 }
 
@@ -2172,7 +2195,10 @@ class TabVC: NSViewController {
         FILTER_DEFAULT_BRANCHES = (sender.state == .on)
         saveConfig(repos: REPOS)
         rebuildContent()
-        (NSApp.delegate as? GHActionsBar)?.updateIcon()
+        let appDel = NSApp.delegate as? GHActionsBar
+        appDel?.updateIcon()
+        // Cadence follows visibility too, so filtering a branch out stops the fast poll.
+        appDel?.scheduleTimer()
     }
 
     @objc func repoChanged(_ sender: NSPopUpButton) {
@@ -2465,6 +2491,7 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
     var timer: Timer?
     var isPulsing = false
     var refreshInFlight = false
+    var pendingCompletion: (() -> Void)?
     var lastPRRefresh = Date.distantPast
     var grouped: [(String, [Run])] = []
     var prGrouped: [(String, [PR])] = []
@@ -2531,7 +2558,7 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
     func scheduleTimer() {
         timer?.invalidate()
         guard !REPOS.isEmpty else { return }
-        let interval = hasActive(grouped) ? POLL_ACTIVE : POLL_NORMAL
+        let interval = hasActive(visibleGrouped(grouped)) ? POLL_ACTIVE : POLL_NORMAL
         timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             self?.refresh()
         }
@@ -2544,7 +2571,13 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
         guard !REPOS.isEmpty else { completion?(); return }
         // Never let refreshes overlap: a slow network poll that outlives the timer
         // interval would otherwise stack concurrent gh-process storms.
-        guard !refreshInFlight else { completion?(); return }
+        // A coalesced refresh still owes its caller a callback once fresh data lands.
+        // Firing it immediately reopened the popover on stale rows. Last one wins:
+        // every caller's completion just reopens the popover, so running it once is right.
+        guard !refreshInFlight else {
+            if let c = completion { pendingCompletion = c }
+            return
+        }
         refreshInFlight = true
         let repos = REPOS  // snapshot on calling thread
         // PRs don't need the fast active-poll cadence — refresh them on the
@@ -2592,6 +2625,9 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
                 self.updateIcon()
                 self.scheduleTimer()
                 completion?()
+                let pending = self.pendingCompletion
+                self.pendingCompletion = nil
+                pending?()
             }
         }
     }
@@ -2611,7 +2647,7 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
     // MARK: - Icon
 
     func updateIcon() {
-        let shown = grouped.map { ($0.0, visibleRuns($0.1)) }
+        let shown = visibleGrouped(grouped)
         let (color, badge, label) = overallStatus(shown)
         statusItem.button?.toolTip = "Cat Eye \u{2014} \(label)"
         if hasActive(shown) { startAnimation(color, badge: badge) }
