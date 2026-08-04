@@ -1,12 +1,16 @@
 # Cat Eye — GitHub Actions & PR Monitor for macOS
 
-> A lightweight, native macOS menu bar app for monitoring GitHub Actions CI/CD status and pull request reviews. Open source, 225KB, zero Electron.
+> A lightweight, native macOS menu bar app for monitoring GitHub Actions CI/CD status and pull request reviews. Open source, ~320KB, accessible, zero Electron.
 
 The octocat's eye never blinks.
 
 **There are plenty of GitHub status apps out there.** Most are Electron wrappers that eat 200MB+ of RAM to show you a green checkmark. Cat Eye exists because a status indicator shouldn't cost more than the IDE it sits next to.
 
-This is a **native macOS menu bar app** — a single 225KB Swift binary, ~31MB RSS, zero frameworks beyond AppKit. It does one thing: shows you whether your GitHub Actions are passing and your PRs need attention. No dashboard, no analytics, no features you'll never use. Just a colored icon that turns red when something breaks.
+Cat Eye is built on three principles:
+
+- **Extremely low footprint** — a single ~320KB Swift binary, ~35MB of RAM, zero frameworks beyond AppKit. No runtime, no bundled browser, no background bloat.
+- **Minimalist** — just the important information: are your Actions passing, and do any PRs need your review. No dashboard, no analytics, no features you'll never use.
+- **Accessible** — colour is never the only signal. Status uses the Okabe-Ito colour-blind-safe palette plus shape and text cues, and everything is keyboard navigable.
 
 | Actions tab | Pull Requests tab |
 |:-----------:|:-----------------:|
@@ -15,10 +19,11 @@ This is a **native macOS menu bar app** — a single 225KB Swift binary, ~31MB R
 ## Features
 
 ### Actions Tab
-- **Live status icon** — GitHub mark tinted green (passing), red (failing), or orange (running)
+- **Live status icon** — GitHub mark tinted by status, with a small badge glyph (check / cross / hourglass) so state is readable without colour
 - **Pulsing animation** — icon gently pulses when any action is actively running
 - **Rich popover** — scrollable list of recent runs across all your repos, styled like the GitHub Actions UI
 - **Per-run details** — workflow name, run number, branch badge, timestamps, and duration
+- **Expandable run rows** — click a run to expand it inline: failed runs show the exact failure annotations (job/step + message), successful runs show the full commit message and durations, in-progress runs show live elapsed time and per-workflow status
 - **Calculated ETA** — estimates remaining time for running actions based on historical durations
 - **macOS notifications** — alerts when actions start, pass, or fail — click the notification to open the popover
 
@@ -34,6 +39,7 @@ This is a **native macOS menu bar app** — a single 225KB Swift binary, ~31MB R
 - **Repo filter** — "All Repos" or pick a specific repo; persists across tabs
 - **Built-in setup** — login to GitHub and pick repos to track from the settings panel
 - **Keyboard accessible** — navigate rows with Tab, activate with Return or Space
+- **Colour-blind friendly** — status colours use the Okabe-Ito colour-blind-safe palette, and every state also carries a shape or text signal (badge glyphs, spelled-out statuses, tooltips)
 - **Copy URL** — one-click copy of any run or PR URL to clipboard
 - **Direct links** — click to open runs or PRs in GitHub
 - **Multi-repo** — monitor as many repos as you want from a single widget
@@ -41,7 +47,7 @@ This is a **native macOS menu bar app** — a single 225KB Swift binary, ~31MB R
 - **Hot-reload config** — change tracked repos from settings without restarting
 - **Auto-detects `gh` CLI** — finds your GitHub CLI install automatically
 - **Error feedback** — clear messages when gh CLI is missing, auth fails, or API errors occur
-- **Tiny footprint** — 225KB binary, ~31MB memory, zero dependencies beyond macOS
+- **Tiny footprint** — ~320KB binary, ~35MB memory, zero dependencies beyond macOS
 
 ## Requirements
 
@@ -139,7 +145,8 @@ Config lives in `~/.config/cat-eye/config.json` (managed via the Settings panel,
     ],
     "pollInterval": 30,
     "pollActiveInterval": 10,
-    "runsPerRepo": 10
+    "runsPerRepo": 10,
+    "filterDefaultBranches": false
 }
 ```
 
@@ -149,6 +156,7 @@ Config lives in `~/.config/cat-eye/config.json` (managed via the Settings panel,
 | `pollInterval` | `30` | Seconds between checks when idle |
 | `pollActiveInterval` | `10` | Seconds between checks when a run is in progress |
 | `runsPerRepo` | `10` | Number of recent runs to fetch per repo |
+| `filterDefaultBranches` | `false` | Hide workflow runs from branches other than `main` or `develop` |
 
 ## Using the Pull Requests tab
 
@@ -185,12 +193,14 @@ xcode-select --install
 
 ## Menu bar icon states
 
-| Icon | Meaning |
-|------|---------|
-| Green | All recent key runs passing |
-| Red | Most recent deploy/test run failed |
-| Orange (pulsing) | A run is currently in progress |
-| Gray | No data or no repos configured |
+Colours come from the [Okabe-Ito colour-blind-safe palette](https://jfly.uni-koeln.de/color/), and each state also punches a badge glyph into the icon so it's readable without colour perception.
+
+| Icon | Badge | Meaning |
+|------|-------|---------|
+| Bluish green | Checkmark | All recent key runs passing |
+| Vermillion | Cross | Most recent deploy/test run failed |
+| Sky blue (pulsing) | Hourglass | A run is currently in progress |
+| Gray | — | No data or no repos configured |
 
 Prioritizes **deploy** and **smoke test** workflows for overall status, so Dependabot noise won't turn your icon red.
 
@@ -209,8 +219,8 @@ Prioritizes **deploy** and **smoke test** workflows for overall status, so Depen
 
 | | Cat Eye | Typical Electron app |
 |---|---|---|
-| **Binary** | 225 KB | 150–300 MB |
-| **Memory** | ~31 MB (0.2%) | 200–400 MB |
+| **Binary** | ~320 KB | 150–300 MB |
+| **Memory** | ~35 MB (0.2%) | 200–400 MB |
 | **CPU at idle** | 0% | 0.5–2% |
 | **Dependencies** | macOS + `gh` CLI | Node.js, Chromium, npm packages |
 | **Startup** | Instant | 2–5 seconds |
@@ -223,10 +233,14 @@ Cat Eye is a single Swift file compiled to a native binary. No runtime, no garba
 |---|---|
 | **Process name** | `cat-eye` |
 | **Spotlight name** | Cat Eye |
-| **Binary size** | ~225KB |
-| **Memory** | ~31 MB / 0.2% on 16GB Mac |
+| **Binary size** | ~320KB |
+| **Memory** | ~35 MB / 0.2% on 16GB Mac |
 | **Bundle ID** | `com.clintoncodewell.cat-eye` |
+
+## Contributing
+
+Contributions welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). The short version: keep it lean (one Swift file, zero dependencies), keep it secure, keep it accessible.
 
 ## License
 
-MIT
+[MIT](LICENSE)
