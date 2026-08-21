@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key>
-    <string>com.clintoncodewell.cat-eye</string>
+    <string>com.clintoncodewell.cateye</string>
     <key>CFBundleName</key>
     <string>Cat Eye</string>
     <key>CFBundleExecutable</key>
@@ -16,7 +16,13 @@
     <string>1.0.2</string>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
     <key>LSUIElement</key>
     <true/>
+    <key>NSSupportsAutomaticTermination</key>
+    <false/>
+    <key>NSSupportsSuddenTermination</key>
+    <false/>
 </dict>
 </plist>

@@ -2503,6 +2503,8 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
     var selectedTab: Int = 0
     var selectedRepo: String? = nil
     var appearanceObs: NSKeyValueObservation?
+    var warnedStatusItemMissing = false
+    var statusItemRecheckDone = false
 
     func applicationDidFinishLaunching(_ note: Notification) {
         log.info("Cat Eye launching — repos: \(REPOS.count), poll: \(POLL_NORMAL)s/\(POLL_ACTIVE)s")
@@ -2518,6 +2520,11 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
         }
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        // Give macOS a stable slot for the item. Anonymous `Item-0` positions can
+        // survive monitor-layout changes with an off-screen x coordinate, leaving
+        // the process alive but the app completely inaccessible.
+        statusItem.autosaveName = "CatEyeStatusItem"
+        statusItem.isVisible = true
         if let btn = statusItem.button {
             btn.image = tintedIcon(ghIcon, .secondaryLabelColor)
             btn.imagePosition = .imageOnly
@@ -2551,6 +2558,55 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
             refresh()
         }
         scheduleTimer()
+    }
+
+    // True when macOS actually placed the status item in a menu bar. A screen left
+    // of or below the built-in display has negative coordinates, so "x >= 0" would
+    // wrongly call a perfectly good item unplaced — test against the real screens.
+    var statusItemIsPlaced: Bool {
+        guard let f = statusItem.button?.window?.frame, f.width > 0 else { return false }
+        return NSScreen.screens.contains { $0.frame.intersects(f) }
+    }
+
+    // Cat Eye has no Dock icon or normal windows. When Finder, Spotlight, Raycast,
+    // or `open` activates an already-running instance, macOS only forwards a reopen
+    // event — without this callback nothing appears and the app looks dead.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            guard self.statusItemIsPlaced else { self.warnStatusItemMissing(); return }
+            // A .transient popover closes the moment the app is not active, and a
+            // reopen does not activate an .accessory app on its own.
+            NSApp.activate(ignoringOtherApps: true)
+            self.closeTime = .distantPast
+            if !self.popover.isShown { self.toggle() }
+        }
+        return true
+    }
+
+    // macOS can refuse to place a status item for one bundle id, which leaves this
+    // app running with no way in at all. Say so once instead of failing silently.
+    func warnStatusItemMissing() {
+        guard !warnedStatusItemMissing else { return }
+        // Plugging or unplugging a display moves the item between menu bars, and the
+        // screen list updates before the item does. Look again before crying wolf —
+        // a false alarm here also burns the one warning we get.
+        guard statusItemRecheckDone else {
+            statusItemRecheckDone = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                guard let self = self, !self.statusItemIsPlaced else { return }
+                self.warnStatusItemMissing()
+            }
+            return
+        }
+        warnedStatusItemMissing = true
+        NSApp.activate(ignoringOtherApps: true)
+        let a = NSAlert()
+        a.messageText = "Cat Eye can't reach the menu bar"
+        a.informativeText = "macOS refused to place Cat Eye's menu bar icon, so there is no way to open it. Changing the app's bundle identifier clears this."
+        a.addButton(withTitle: "Quit Cat Eye")
+        a.addButton(withTitle: "Keep Running")
+        if a.runModal() == .alertFirstButtonReturn { NSApp.terminate(nil) }
     }
 
     // MARK: - Polling
