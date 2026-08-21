@@ -1,0 +1,54 @@
+main.swift
+  s_37562aa91d740d::t_2b7d35d738a31c 2507,2591-2601
+  s_37562aa91d740d::t_18b59401f56077 2566,2576
+  s_ca3124fa84e29c::t_5591eaa7e90c4d 2563-2565,2567-2568,2572-2573,2577-2582,2585-2590,2602-2610
+  s_ef473e850a1765::t_45717d9d5bfdd7 2523-2527,2569-2571,2574-2575,2583-2584
+  s_ca3124fa84e29c::t_6fb352bf33418b 2506
+  s_37562aa91d740d::t_57da5383b3faad 2611
+build.sh
+  s_37562aa91d740d::t_aeb09ffaf71820 8-9
+CatEye.app/Contents/Info.plist
+  s_37562aa91d740d::t_18b59401f56077 6
+  s_8f8dcb5adb17cb::t_0c40fe8ea4f57d 19-20
+  s_37562aa91d740d::t_56fd4b23d73937 23-26
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.23",
+  "base_commit_sha": "1a6a4646bac4f29e7494c701e62e66f2be335978",
+  "prompts": {},
+  "sessions": {
+    "s_37562aa91d740d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2181b075-09dd-4a3b-9671-54f997026b55",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Clinton Cunningham <188536720+clintoncodewell@users.noreply.github.com>"
+    },
+    "s_8f8dcb5adb17cb": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a023a6-aa56-7960-9387-4efb0b7cc822",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Clinton Cunningham <188536720+clintoncodewell@users.noreply.github.com>"
+    },
+    "s_ca3124fa84e29c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6385f671-02aa-46ff-bdaa-c2db05d7fd98",
+        "model": "glm-5.3"
+      },
+      "human_author": "Clinton Cunningham <188536720+clintoncodewell@users.noreply.github.com>"
+    },
+    "s_ef473e850a1765": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a02216-f505-7220-bf40-2b915bf38980",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Clinton Cunningham <188536720+clintoncodewell@users.noreply.github.com>"
+    }
+  }
+}
