@@ -187,10 +187,15 @@ func ghShell(_ args: String...) -> Data? {
         proc.waitUntilExit()
         guard proc.terminationStatus == 0 else {
             let errStr = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            log.warning("gh \(args.joined(separator: " ")) exited \(proc.terminationStatus): \(errStr)")
+            // Public on purpose: os_log redacts interpolated strings by default,
+            // which turned every one of these into "gh <private> exited 1:
+            // <private>" and made a whole night of failures undiagnosable.
+            log.warning("gh \(args.joined(separator: " "), privacy: .public) exited \(proc.terminationStatus): \(errStr, privacy: .public)")
             let low = errStr.lowercased()
             if low.contains("auth") || low.contains("login") {
                 lastFetchError = "Not authenticated. Run: gh auth login"
+            } else if low.contains("rate limit") {
+                lastFetchError = "GitHub API rate limit hit — retries resume after the reset"
             } else if low.contains("404") {
                 // GitHub answers 404, not 401, for a private repo when the token
                 // is expired or lost a scope — so a bare 404 is an auth problem
