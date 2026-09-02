@@ -190,16 +190,24 @@ func ghShell(_ args: String...) -> Data? {
             // Public on purpose: os_log redacts interpolated strings by default,
             // which turned every one of these into "gh <private> exited 1:
             // <private>" and made a whole night of failures undiagnosable.
-            log.warning("gh \(args.joined(separator: " "), privacy: .public) exited \(proc.terminationStatus): \(errStr, privacy: .public)")
+            // Only the first two args: "api repos/x/y/actions/runs" or "pr review"
+            // is all the diagnosis needs, and it keeps a `pr review -b <body>`
+            // out of a log any process on the machine can read.
+            log.warning("gh \(args.prefix(2).joined(separator: " "), privacy: .public) exited \(proc.terminationStatus): \(errStr, privacy: .public)")
             let low = errStr.lowercased()
-            if low.contains("auth") || low.contains("login") {
-                lastFetchError = "Not authenticated. Run: gh auth login"
-            } else if low.contains("rate limit") {
+            // Order matters: gh's unauthenticated 403 reads "API rate limit
+            // exceeded ... Authenticated requests get a higher rate limit",
+            // so the auth test would swallow it if it ran first.
+            if low.contains("rate limit") {
                 lastFetchError = "GitHub API rate limit hit — retries resume after the reset"
-            } else if low.contains("404") {
+            } else if low.contains("auth") || low.contains("login") || low.contains("bad credentials") {
+                lastFetchError = "Not authenticated. Run: gh auth login"
+            } else if low.contains("404") || low.contains("could not resolve to a repository") {
                 // GitHub answers 404, not 401, for a private repo when the token
                 // is expired or lost a scope — so a bare 404 is an auth problem
-                // far more often than a wrong repo name. Say both.
+                // far more often than a wrong repo name. Say both. `gh pr list`
+                // goes through GraphQL, which words the same case as
+                // "Could not resolve to a Repository".
                 lastFetchError = "No access — run: gh auth login (or check the repo name)"
             } else if !errStr.isEmpty {
                 lastFetchError = String(errStr.prefix(120))
