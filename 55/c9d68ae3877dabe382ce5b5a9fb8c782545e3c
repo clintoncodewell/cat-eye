@@ -1,0 +1,22 @@
+update.sh
+  s_3485bf908661ab::t_600f7ca7c6daf6 16-22
+main.swift
+  s_3485bf908661ab::t_6c25bd72d3cd0d 193-196,198-201,204-205,208-210
+  s_3485bf908661ab::t_53a65da1837e2f 203
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "55c9d68ae3877dabe382ce5b5a9fb8c782545e3c",
+  "prompts": {},
+  "sessions": {
+    "s_3485bf908661ab": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7cbc9430-1bcd-4bc3-94e0-70c2d092f8dc",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Clinton Cunningham <188536720+clintoncodewell@users.noreply.github.com>"
+    }
+  }
+}
