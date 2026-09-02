@@ -188,8 +188,14 @@ func ghShell(_ args: String...) -> Data? {
         guard proc.terminationStatus == 0 else {
             let errStr = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             log.warning("gh \(args.joined(separator: " ")) exited \(proc.terminationStatus): \(errStr)")
-            if errStr.contains("auth") || errStr.contains("login") {
+            let low = errStr.lowercased()
+            if low.contains("auth") || low.contains("login") {
                 lastFetchError = "Not authenticated. Run: gh auth login"
+            } else if low.contains("404") {
+                // GitHub answers 404, not 401, for a private repo when the token
+                // is expired or lost a scope — so a bare 404 is an auth problem
+                // far more often than a wrong repo name. Say both.
+                lastFetchError = "No access — run: gh auth login (or check the repo name)"
             } else if !errStr.isEmpty {
                 lastFetchError = String(errStr.prefix(120))
             }
