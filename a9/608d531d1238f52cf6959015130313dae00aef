@@ -1,0 +1,20 @@
+README.md
+  s_3485bf908661ab::t_87f4c0505edf97 3,11,37-42,44,52,56,67-68,165,169,171,196-197,221,231,245,247
+  s_3485bf908661ab::t_7e417524bd17d1 12
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "a9608d531d1238f52cf6959015130313dae00aef",
+  "prompts": {},
+  "sessions": {
+    "s_3485bf908661ab": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7cbc9430-1bcd-4bc3-94e0-70c2d092f8dc",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Clinton Cunningham <188536720+clintoncodewell@users.noreply.github.com>"
+    }
+  }
+}
