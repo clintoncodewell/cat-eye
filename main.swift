@@ -2633,7 +2633,12 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
     func scheduleTimer() {
         timer?.invalidate()
         guard !REPOS.isEmpty else { return }
-        let interval = hasActive(visibleGrouped(grouped)) ? POLL_ACTIVE : POLL_NORMAL
+        // The fast cadence exists for the person reading the popover. With it shut,
+        // the menu bar icon only has to be roughly right, and 10s polling through a
+        // long CI run cost a measured 1,148 REST calls/hour — 23% of the GitHub
+        // budget — that nobody was looking at.
+        let interval = (popover.isShown && hasActive(visibleGrouped(grouped)))
+            ? POLL_ACTIVE : POLL_NORMAL
         timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             self?.refresh()
         }
@@ -2817,6 +2822,10 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
             }
             NSApp.activate(ignoringOtherApps: true)
             popover.show(relativeTo: statusItem.button!.bounds, of: statusItem.button!, preferredEdge: .minY)
+            // Opening is the one moment the rows must be current, and the fast
+            // cadence only starts from here, so pull once straight away.
+            refresh()
+            scheduleTimer()
         }
     }
 
@@ -2901,6 +2910,7 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
     func popoverDidClose(_ notification: Notification) {
         closeTime = Date()
         popover.contentViewController = nil  // Release settings view if open
+        scheduleTimer()                      // nobody is watching: back to the slow cadence
     }
 }
 
