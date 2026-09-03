@@ -2822,9 +2822,10 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
             }
             NSApp.activate(ignoringOtherApps: true)
             popover.show(relativeTo: statusItem.button!.bounds, of: statusItem.button!, preferredEdge: .minY)
-            // Opening is the one moment the rows must be current, and the fast
-            // cadence only starts from here, so pull once straight away.
-            refresh()
+            // No refresh here. makeTabVC() snapshots `grouped` at build time and
+            // never re-reads it, so a fetch started now lands in a view nobody is
+            // looking at — and doRefresh()/onConfigSaved() already refresh before
+            // they call toggle(), so it would double their cost.
             scheduleTimer()
         }
     }
