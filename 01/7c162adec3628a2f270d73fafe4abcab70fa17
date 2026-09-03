@@ -1,0 +1,19 @@
+CatEye.app/Contents/Info.plist
+  s_3485bf908661ab::t_078b7ca8d0af23 14,16
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "017c162adec3628a2f270d73fafe4abcab70fa17",
+  "prompts": {},
+  "sessions": {
+    "s_3485bf908661ab": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7cbc9430-1bcd-4bc3-94e0-70c2d092f8dc",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Clinton Cunningham <188536720+clintoncodewell@users.noreply.github.com>"
+    }
+  }
+}
