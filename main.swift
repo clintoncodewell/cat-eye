@@ -511,23 +511,8 @@ func overallStatus(_ g: [(String, [Run])]) -> (color: NSColor, badge: String?, l
     return (C_SUCCESS, "checkmark.circle.fill", "All runs passing")
 }
 
-// A run stops earning the fast poll once it has been going for hours: it is hung
-// or orphaned, not something that needs 10-second freshness. Measured 2026-09-03:
-// one "PR Tests" run sat in_progress for 10 hours, which pinned the app to
-// POLL_ACTIVE — 1,210 API calls/hour, 24% of the GitHub budget — and pulsed the
-// menu bar icon all night. GitHub's own job timeout is 6 hours.
-// ponytail: fixed cutoff, make it a config key if a real build ever runs past it.
-let ACTIVE_MAX_AGE: TimeInterval = 2 * 3600
-
-func isActive(_ r: Run) -> Bool {
-    guard r.status == "in_progress" || r.status == "queued" else { return false }
-    // No parsable start time: call it live rather than silently ignoring a run.
-    guard let started = parseISO(r.startedAt ?? r.createdAt) else { return true }
-    return Date().timeIntervalSince(started) < ACTIVE_MAX_AGE
-}
-
 func hasActive(_ g: [(String, [Run])]) -> Bool {
-    g.flatMap { $0.1 }.contains(where: isActive)
+    g.flatMap { $0.1 }.contains { $0.status == "in_progress" || $0.status == "queued" }
 }
 
 // The rows the Actions list actually renders. The menu bar icon must agree with this,
@@ -823,19 +808,6 @@ func runSelfTest() {
     check(visibleGrouped(g)[0].1.count == 1, "filtered: only default-branch rows visible")
     check(!hasActive(visibleGrouped(g)), "filtered: hidden run must not force the fast poll")
     FILTER_DEFAULT_BRANCHES = false
-
-    // A run "in_progress" for hours is hung, not live, and must not hold the
-    // app on the fast poll.
-    func runStarted(_ ago: TimeInterval) -> Run {
-        let t = isoFmt.string(from: Date().addingTimeInterval(-ago))
-        return Run(id: 2, name: "ci", displayTitle: "t", status: "in_progress", conclusion: nil,
-                   headBranch: "main", headSha: "s", event: "push", url: "u",
-                   updatedAt: t, createdAt: t, startedAt: t, number: 1,
-                   workflowName: "ci", actorLogin: nil)
-    }
-    check(hasActive([("o/r", [runStarted(60)])]), "fresh run keeps the fast poll")
-    check(!hasActive([("o/r", [runStarted(ACTIVE_MAX_AGE + 60)])]), "stale run must not hold the fast poll")
-    check(hasActive([("o/r", [run("main", "queued")])]), "no start time: still counts as live")
 
     print("SELFTEST OK — \(ins.count) insights, report \(md.count) chars")
 }
