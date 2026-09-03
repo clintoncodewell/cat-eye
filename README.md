@@ -1,6 +1,6 @@
 # Cat Eye — GitHub Actions & PR Monitor for macOS
 
-> A lightweight, native macOS menu bar app for monitoring GitHub Actions CI/CD status and pull request reviews. Open source, ~320KB, accessible, zero Electron.
+> A lightweight, native macOS menu bar app for monitoring GitHub Actions CI/CD status, pull request reviews, and weekly CI health. Open source, ~380KB, accessible, zero Electron.
 
 The octocat's eye never blinks.
 
@@ -8,8 +8,8 @@ The octocat's eye never blinks.
 
 Cat Eye is built on three principles:
 
-- **Extremely low footprint** — a single ~320KB Swift binary, ~35MB of RAM, zero frameworks beyond AppKit. No runtime, no bundled browser, no background bloat.
-- **Minimalist** — just the important information: are your Actions passing, and do any PRs need your review. No dashboard, no analytics, no features you'll never use.
+- **Extremely low footprint** — a single ~380KB Swift binary, ~35MB of RAM, zero frameworks beyond AppKit. No runtime, no bundled browser, no background bloat.
+- **Minimalist** — just the important information: are your Actions passing, and do any PRs need your review. Deeper stats live behind the Insights tab, so the default view stays a status light, not a dashboard.
 - **Accessible** — colour is never the only signal. Status uses the Okabe-Ito colour-blind-safe palette plus shape and text cues, and everything is keyboard navigable.
 
 | Actions tab | Pull Requests tab |
@@ -34,8 +34,14 @@ Cat Eye is built on three principles:
 - **Inline comments** — type and submit comments without leaving the popover
 - **Safe input** — popover won't dismiss while you're typing a comment
 
+### Insights Tab
+- **Deploy log** — every run Cat Eye sees is appended to `~/.config/cat-eye/deploys.jsonl`, so your history survives restarts
+- **Last 7 days vs previous 7** — pass rate, average duration, deploy pass rate, and a per-workflow breakdown
+- **Automatic insights** — slowest workflow, biggest failure source, and the branches that fail most
+- **Copy report for AI** — copies a full markdown report plus a task prompt, ready to paste into Claude or ChatGPT
+
 ### General
-- **Tabbed interface** — switch between Actions and Pull Requests
+- **Tabbed interface** — switch between Actions, PRs and Insights
 - **Repo filter** — "All Repos" or pick a specific repo; persists across tabs
 - **Built-in setup** — login to GitHub and pick repos to track from the settings panel
 - **Keyboard accessible** — navigate rows with Tab, activate with Return or Space
@@ -43,11 +49,11 @@ Cat Eye is built on three principles:
 - **Copy URL** — one-click copy of any run or PR URL to clipboard
 - **Direct links** — click to open runs or PRs in GitHub
 - **Multi-repo** — monitor as many repos as you want from a single widget
-- **Adaptive polling** — 30s when idle, 10s when actions are running (configurable)
+- **Adaptive polling** — 30s normally, 10s while the popover is open and a run is in progress (both configurable)
 - **Hot-reload config** — change tracked repos from settings without restarting
 - **Auto-detects `gh` CLI** — finds your GitHub CLI install automatically
 - **Error feedback** — clear messages when gh CLI is missing, auth fails, or API errors occur
-- **Tiny footprint** — ~320KB binary, ~35MB memory, zero dependencies beyond macOS
+- **Tiny footprint** — ~380KB binary, ~35MB memory, zero dependencies beyond macOS
 
 ## Requirements
 
@@ -57,6 +63,8 @@ Cat Eye is built on three principles:
 - Xcode Command Line Tools only if building from source (`xcode-select --install`)
 
 ## Installation
+
+> **Upgrading from 1.0.x:** the bundle identifier changed to `com.clintoncodewell.cateye`. macOS treats that as a new app, so you will be asked for notification permission again, and any old `CatEye.app` should be deleted. Your settings in `~/.config/cat-eye/config.json` carry over untouched.
 
 ### Option 1: Homebrew (recommended)
 
@@ -154,13 +162,13 @@ Config lives in `~/.config/cat-eye/config.json` (managed via the Settings panel,
 |-----|---------|-------------|
 | `repos` | `[]` | GitHub repos to monitor (`owner/repo` format) |
 | `pollInterval` | `30` | Seconds between checks when idle |
-| `pollActiveInterval` | `10` | Seconds between checks when a run is in progress |
+| `pollActiveInterval` | `10` | Seconds between checks while the popover is open and a run is in progress |
 | `runsPerRepo` | `10` | Number of recent runs to fetch per repo |
 | `filterDefaultBranches` | `false` | Hide workflow runs from branches other than `main` or `develop` |
 
-## Using the Pull Requests tab
+## Using the PRs tab
 
-Switch to the **Pull Requests** tab to see PRs where your review is requested.
+Switch to the **PRs** tab to see pull requests where your review is requested.
 
 - **Expand a PR** — click any PR row to expand it inline, showing the description, labels, and action buttons
 - **Approve** — click "Approve" (optionally type a comment first)
@@ -185,8 +193,8 @@ xcode-select --install
 ## How it works
 
 - Uses the `gh` CLI under the hood — no API tokens to manage, no OAuth flows. If `gh auth status` works, Cat Eye works.
-- Fetches run and PR data via `gh run list` and `gh pr list` for each configured repo, all concurrently.
-- PR tab uses `review-requested:@me` to show only PRs where your review was explicitly requested.
+- Fetches runs via `gh api repos/OWNER/REPO/actions/runs` and PRs via `gh pr list --search review-requested:@me`, for every configured repo, all concurrently.
+- The 10-second poll runs only while the popover is open. Closed, Cat Eye falls back to the normal interval — measured on a real machine, that took a long CI run from 1,148 GitHub API calls/hour down to 382.
 - PR actions (approve, comment, merge, close) call `gh pr review`, `gh pr comment`, `gh pr merge`, and `gh pr close` respectively.
 - Runs as a macOS accessory app (no Dock icon, no Cmd+Tab entry).
 - Notifications use the native `UserNotifications` framework — respects Do Not Disturb and Focus modes.
@@ -210,6 +218,7 @@ Prioritizes **deploy** and **smoke test** workflows for overall status, so Depen
 |---------|-----|
 | Icon stays gray, "GitHub CLI not found" | Install gh: `brew install gh` and restart Cat Eye |
 | "Not authenticated" error | Run `gh auth login` in Terminal, or click Login in Settings |
+| "No access" or a 404 from `gh` | The token expired or lost a scope. GitHub answers 404, not 401, for a private repo it cannot see — run `gh auth login` |
 | No PRs showing | The PR tab only shows PRs where **your review is requested** — not all open PRs |
 | Popover closes while typing | Expand a PR first — this switches to semitransient mode |
 | Config changes not taking effect | Click "Save & Apply" in Settings — no restart needed |
@@ -219,7 +228,7 @@ Prioritizes **deploy** and **smoke test** workflows for overall status, so Depen
 
 | | Cat Eye | Typical Electron app |
 |---|---|---|
-| **Binary** | ~320 KB | 150–300 MB |
+| **Binary** | ~380 KB | 150–300 MB |
 | **Memory** | ~35 MB (0.2%) | 200–400 MB |
 | **CPU at idle** | 0% | 0.5–2% |
 | **Dependencies** | macOS + `gh` CLI | Node.js, Chromium, npm packages |
@@ -233,9 +242,9 @@ Cat Eye is a single Swift file compiled to a native binary. No runtime, no garba
 |---|---|
 | **Process name** | `cat-eye` |
 | **Spotlight name** | Cat Eye |
-| **Binary size** | ~320KB |
+| **Binary size** | ~380KB |
 | **Memory** | ~35 MB / 0.2% on 16GB Mac |
-| **Bundle ID** | `com.clintoncodewell.cat-eye` |
+| **Bundle ID** | `com.clintoncodewell.cateye` |
 
 ## Contributing
 
