@@ -863,6 +863,7 @@ func tintedIcon(_ base: NSImage?, _ color: NSColor) -> NSImage {
         return true
     }
     img.isTemplate = false
+    img.cacheMode = .never  // re-resolve dynamic colours per menu bar, per draw
     return img
 }
 
@@ -897,6 +898,7 @@ func statusBadgedIcon(_ base: NSImage?, color: NSColor, badge: String?) -> NSIma
         return true
     }
     img.isTemplate = false
+    img.cacheMode = .never  // re-resolve dynamic colours per menu bar, per draw
     return img
 }
 
@@ -2509,6 +2511,7 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
     var popover: NSPopover!
     var timer: Timer?
     var isPulsing = false
+    var iconKey: String?   // colour + badge of the image the button already shows
     var refreshInFlight = false
     var pendingCompletion: (() -> Void)?
     var lastPRRefresh = Date.distantPast
@@ -2521,7 +2524,6 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
     var prevStatuses: [String: String] = [:]
     var selectedTab: Int = 0
     var selectedRepo: String? = nil
-    var appearanceObs: NSKeyValueObservation?
     var warnedStatusItemMissing = false
     var statusItemRecheckDone = false
 
@@ -2549,10 +2551,12 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
             btn.imagePosition = .imageOnly
             btn.target = self
             btn.action = #selector(toggle)
-            // Re-render the cached tinted icon when the system flips light/dark.
-            appearanceObs = btn.observe(\.effectiveAppearance, options: [.new]) { [weak self] _, _ in
-                DispatchQueue.main.async { self?.updateIcon() }
-            }
+            // No effectiveAppearance observer here. On macOS 26 the menu bar
+            // snapshots this button once per display, under that display's
+            // appearance, so the KVO fired on every snapshot; resetting the image
+            // forced a new snapshot, and the loop held a core at 100%. The icon's
+            // drawing handler resolves its colours at draw time anyway, and
+            // systemAppearanceChanged() covers the real light/dark flip.
         }
 
         popover = NSPopover()
@@ -2733,13 +2737,22 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
         if hasActive(shown) { startAnimation(color, badge: badge) }
         else {
             stopAnimation()
-            statusItem.button?.image = statusBadgedIcon(ghIcon, color: color, badge: badge)
+            setIcon(color, badge: badge)
         }
+    }
+
+    // Every new image makes the menu bar re-snapshot the button on each display,
+    // so only swap it when the colour or badge actually changes.
+    func setIcon(_ color: NSColor, badge: String?) {
+        let key = "\(color)|\(badge ?? "")"
+        guard key != iconKey, let btn = statusItem.button else { return }
+        iconKey = key
+        btn.image = statusBadgedIcon(ghIcon, color: color, badge: badge)
     }
 
     func startAnimation(_ color: NSColor, badge: String?) {
         guard let btn = statusItem.button else { return }
-        btn.image = statusBadgedIcon(ghIcon, color: color, badge: badge)
+        setIcon(color, badge: badge)
         guard !isPulsing else { return }
         isPulsing = true
         // Breathing pulse via Core Animation: runs entirely in the render server,
@@ -2868,6 +2881,7 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             self.applySystemAppearance()
+            self.iconKey = nil   // force a fresh image for the new theme
             self.updateIcon()
             // Discard the stale view tree (its CGColors are baked in the OLD appearance).
             // Next show reconstructs under the new drawing context.
