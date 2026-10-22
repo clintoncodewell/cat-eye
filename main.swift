@@ -20,6 +20,7 @@ var REPOS: [String] = []
 var POLL_NORMAL: TimeInterval = 30
 var POLL_ACTIVE: TimeInterval = 10
 var RUNS_PER_REPO: Int = 10
+let GH_PARALLEL = 3          // gh processes allowed at once during a refresh
 var FILTER_DEFAULT_BRANCHES: Bool = false
 let DEFAULT_BRANCHES: Set<String> = ["main", "develop"]
 
@@ -535,6 +536,7 @@ func visibleGrouped(_ g: [(String, [Run])]) -> [(String, [Run])] {
 // you can paste into an AI agent to act on.
 
 let DEPLOY_LOG_PATH = (CONFIG_DIR as NSString).appendingPathComponent("deploys.jsonl")
+let DEPLOY_LOG_KEEP_DAYS = 90.0
 
 struct DeployRecord: Codable {
     let repo: String
@@ -574,7 +576,28 @@ final class DeployLog {
     private func ensureLoaded() {
         guard !loaded else { return }
         loaded = true
-        for r in DeployLog.parse(readRaw()) { seen.insert(key(r.url, r.conclusion)) }
+        let raw = readRaw()
+        for r in DeployLog.parse(raw) { seen.insert(key(r.url, r.conclusion)) }
+        // The Insights tab parses the whole file on open, so cap its size here.
+        let lines = raw.split(separator: "\n").map(String.init)
+        let kept = DeployLog.prune(lines, now: Date())
+        guard kept.count < lines.count else { return }
+        try? kept.map { $0 + "\n" }.joined().write(toFile: DEPLOY_LOG_PATH, atomically: true, encoding: .utf8)
+        log.info("DeployLog: pruned \(lines.count - kept.count) record(s) older than \(Int(DEPLOY_LOG_KEEP_DAYS)) days")
+    }
+
+    static func cutoff(_ now: Date) -> Date { now.addingTimeInterval(-DEPLOY_LOG_KEEP_DAYS * 86400) }
+
+    // Drops only lines that decode and completed before the cutoff. A line that
+    // doesn't decode (a torn append, another build's schema) is kept, not lost.
+    // Insights only look back 14 days; 90 keeps room for a longer view later.
+    static func prune(_ lines: [String], now: Date) -> [String] {
+        let dec = JSONDecoder()
+        return lines.filter { line in
+            guard let d = line.data(using: .utf8), let r = try? dec.decode(DeployRecord.self, from: d),
+                  let done = parseISO(r.completedAt) else { return true }
+            return done >= cutoff(now)
+        }
     }
 
     static func parse(_ raw: String) -> [DeployRecord] {
@@ -597,6 +620,9 @@ final class DeployLog {
                     let concl = r.conclusion ?? "unknown"
                     let k = self.key(r.url, concl)
                     if self.seen.contains(k) { continue }
+                    // An expired run on a quiet repo's latest page would be pruned
+                    // and re-appended on alternate launches; never log it at all.
+                    if let done = parseISO(r.updatedAt), done < DeployLog.cutoff(Date()) { continue }
                     self.seen.insert(k)
                     var dur = 0.0
                     if let s = parseISO(r.startedAt) ?? parseISO(r.createdAt),
@@ -626,8 +652,8 @@ final class DeployLog {
 
     func all() -> [DeployRecord] { DeployLog.parse(q.sync { readRaw() }) }
 }
-// ponytail: log file + in-memory seen-set grow unbounded; fine for a personal tool
-// (~300B/record). Add rotation/pruning only if it ever gets large.
+// ponytail: the in-memory seen-set still grows for the life of the process; it is
+// tiny (one short string per run) and resets on relaunch.
 
 struct WFStat {
     let workflow: String
@@ -809,6 +835,13 @@ func runSelfTest() {
     check(!hasActive(visibleGrouped(g)), "filtered: hidden run must not force the fast poll")
     FILTER_DEFAULT_BRANCHES = false
 
+    // History pruning drops only records older than 90 days; lines it can't read stay.
+    func line(_ r: DeployRecord) -> String { String(data: try! JSONEncoder().encode(r), encoding: .utf8)! }
+    let pruned = DeployLog.prune([line(rec("a", "success", 1, ago: 1 * day)), line(rec("b", "success", 1, ago: 91 * day)),
+                                  "{\"torn\": tr"], now: Date())
+    check(pruned.count == 2 && pruned[0].contains("\"workflow\":\"a\"") && pruned[1].hasPrefix("{\"torn"),
+          "prune drops old records and keeps unreadable lines")
+
     print("SELFTEST OK — \(ins.count) insights, report \(md.count) chars")
 }
 
@@ -872,12 +905,13 @@ func tintedIcon(_ base: NSImage?, _ color: NSColor) -> NSImage {
 func statusBadgedIcon(_ base: NSImage?, color: NSColor, badge: String?) -> NSImage {
     guard let base = base else { return NSImage() }
     let sz = base.size
+    // Looked up once: the handler reruns on every draw (cacheMode .never).
+    let sym = badge.flatMap { NSImage(systemSymbolName: $0, accessibilityDescription: nil) }
     let img = NSImage(size: sz, flipped: false) { rect in
         base.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1.0)
         color.set()
         rect.fill(using: .sourceAtop)
-        guard let name = badge,
-              let sym = NSImage(systemSymbolName: name, accessibilityDescription: nil) else { return true }
+        guard let sym = sym else { return true }
         let b: CGFloat = 10
         let bRect = NSRect(x: sz.width - b, y: 0, width: b, height: b)
         // Punch a clear ring so the badge separates from the cat silhouette.
@@ -2511,7 +2545,7 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
     var popover: NSPopover!
     var timer: Timer?
     var isPulsing = false
-    var iconKey: String?   // colour + badge of the image the button already shows
+    var iconKey: (color: NSColor, badge: String?)?   // what the button already shows
     var refreshInFlight = false
     var pendingCompletion: (() -> Void)?
     var lastPRRefresh = Date.distantPast
@@ -2688,9 +2722,18 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
                     }
                 }
             }
-            // concurrentPerform caps parallelism at the core count, so many repos
-            // no longer launch an unbounded burst of simultaneous gh processes.
-            DispatchQueue.concurrentPerform(iterations: tasks.count) { tasks[$0]() }
+            // At most GH_PARALLEL gh processes at once: each one holds ~45 MB, so
+            // running all of them together spiked memory by hundreds of MB per poll.
+            // Lanes take the next task from a shared index, so one slow call
+            // doesn't hold up a fixed slice while the other lanes sit idle.
+            var next = 0
+            DispatchQueue.concurrentPerform(iterations: min(GH_PARALLEL, tasks.count)) { _ in
+                while true {
+                    let i: Int = collectQ.sync { defer { next += 1 }; return next }
+                    guard i < tasks.count else { return }
+                    tasks[i]()
+                }
+            }
             let elapsed = Date().timeIntervalSince(start)
             let totalRuns = runRes.reduce(0) { $0 + $1.1.count }
             let totalPRs = prRes.reduce(0) { $0 + $1.1.count }
@@ -2744,9 +2787,9 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
     // Every new image makes the menu bar re-snapshot the button on each display,
     // so only swap it when the colour or badge actually changes.
     func setIcon(_ color: NSColor, badge: String?) {
-        let key = "\(color)|\(badge ?? "")"
-        guard key != iconKey, let btn = statusItem.button else { return }
-        iconKey = key
+        if let k = iconKey, k.color.isEqual(color), k.badge == badge { return }
+        guard let btn = statusItem.button else { return }
+        iconKey = (color, badge)
         btn.image = statusBadgedIcon(ghIcon, color: color, badge: badge)
     }
 
