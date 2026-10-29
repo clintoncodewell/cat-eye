@@ -25,7 +25,7 @@ Cat Eye is built on three principles:
 - **Per-run details** — workflow name, run number, branch badge, timestamps, and duration
 - **Expandable run rows** — click a run to expand it inline: failed runs show the exact failure annotations (job/step + message), successful runs show the full commit message and durations, in-progress runs show live elapsed time and per-workflow status
 - **Calculated ETA** — estimates remaining time for running actions based on historical durations
-- **macOS notifications** — alerts when actions start, pass, or fail — click the notification to open the popover
+- **macOS notifications** — alerts when actions start, pass, fail, get cancelled, or are skipped (even fast builds that finish between polls) — click the notification to open the popover
 
 ### Pull Requests Tab
 - **Review queue** — shows PRs where your review is requested, across all tracked repos
@@ -222,6 +222,7 @@ Prioritizes **deploy** and **smoke test** workflows for overall status, so Depen
 | No PRs showing | The PR tab only shows PRs where **your review is requested** — not all open PRs |
 | Popover closes while typing | Expand a PR first — this switches to semitransient mode |
 | Config changes not taking effect | Click "Save & Apply" in Settings — no restart needed |
+| Theme stuck in light/dark until restart | Update to the latest build (`./update.sh`) — old builds pinned appearance at launch instead of following the system |
 | Build fails | Ensure Xcode Command Line Tools are installed: `xcode-select --install` |
 
 ## Why Cat Eye?
