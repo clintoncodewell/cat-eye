@@ -809,6 +809,24 @@ func runSelfTest() {
     check(!hasActive(visibleGrouped(g)), "filtered: hidden run must not force the fast poll")
     FILTER_DEFAULT_BRANCHES = false
 
+    // Notification transitions: short builds that complete between polls (never
+    // seen active) must still notify, and titles must match the conclusion.
+    func tRun(_ status: String, _ concl: String?, _ url: String) -> Run {
+        Run(id: 1, name: "ci", displayTitle: "t", status: status, conclusion: concl,
+            headBranch: "main", headSha: "s", event: "push", url: url,
+            updatedAt: "", createdAt: "", startedAt: nil, number: 1,
+            workflowName: "ci", actorLogin: nil)
+    }
+    check(isNewCompletion(old: "in_progress", new: tRun("completed", "success", "u1")), "in_progress→completed notifies")
+    check(isNewCompletion(old: "queued", new: tRun("completed", "failure", "u2")), "queued→completed notifies")
+    check(isNewCompletion(old: nil, new: tRun("completed", "success", "u3")), "first-seen completed notifies (short build)")
+    check(!isNewCompletion(old: "completed", new: tRun("completed", "success", "u1")), "stable completed does not re-notify")
+    check(!isNewCompletion(old: nil, new: tRun("in_progress", nil, "u4")), "active run is not a completion")
+    check(completionTitle(for: "success").contains("Passed"), "pass title")
+    check(completionTitle(for: "failure").contains("Failed"), "fail title")
+    check(completionTitle(for: "cancelled").contains("Cancelled"), "cancelled title")
+    check(completionTitle(for: "skipped").contains("Skipped"), "skipped title")
+
     print("SELFTEST OK — \(ins.count) insights, report \(md.count) chars")
 }
 
@@ -2504,6 +2522,24 @@ class SettingsVC: NSViewController {
 
 // ─── App ─────────────────────────────────────────────────────────────────────
 
+func completionTitle(for conclusion: String?) -> String {
+    switch conclusion ?? "" {
+    case "success": return "\u{2705} Action Passed"
+    case "failure": return "\u{274C} Action Failed"
+    case "cancelled": return "\u{23F9}\u{FE0F} Action Cancelled"
+    case "skipped": return "\u{23ED}\u{FE0F} Action Skipped"
+    default: return "\u{2139}\u{FE0F} Action Completed"
+    }
+}
+
+// A run counts as newly completed when it finished while we were watching —
+// including short builds that went queued→completed entirely between two
+// polls (old == nil) and were never seen active. First-launch seeding is
+// excluded by the caller, so launch never spams for old runs.
+func isNewCompletion(old: String?, new: Run) -> Bool {
+    new.status == "completed" && (old == "in_progress" || old == "queued" || old == nil)
+}
+
 class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNotificationCenterDelegate {
     var statusItem: NSStatusItem!
     var popover: NSPopover!
@@ -2522,6 +2558,7 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
     var selectedTab: Int = 0
     var selectedRepo: String? = nil
     var appearanceObs: NSKeyValueObservation?
+    var appearanceReapplyPending = false
     var warnedStatusItemMissing = false
     var statusItemRecheckDone = false
 
@@ -2562,10 +2599,15 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
         applySystemAppearance()   // pins NSApp.appearance + popover.appearance from defaults
 
         // System-wide light/dark toggle. NSApp.effectiveAppearance is unreliable for
-        // .accessory apps, so we listen for the canonical distributed notification.
+        // .accessory apps, so we listen for the canonical distributed notification
+        // AND AppKit's own effective-appearance change (belt and suspenders: Auto
+        // schedule flips don't always post both).
         DistributedNotificationCenter.default.addObserver(
             self, selector: #selector(systemAppearanceChanged),
             name: NSNotification.Name("AppleInterfaceThemeChangedNotification"), object: nil)
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(systemAppearanceChanged),
+            name: NSApplication.didChangeEffectiveAppearanceNotification, object: nil)
 
         if REPOS.isEmpty {
             // First run: open popover with settings
@@ -2601,6 +2643,14 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
             if !self.popover.isShown { self.toggle() }
         }
         return true
+    }
+
+    // Safety net for a missed theme notification: re-resolve appearance every
+    // time the app activates (e.g. the user clicks the menu bar icon after
+    // flipping light/dark in System Settings). Cheap and idempotent.
+    func applicationDidBecomeActive(_ note: Notification) {
+        applySystemAppearance()
+        updateIcon()
     }
 
     // macOS can refuse to place a status item for one bundle id, which leaves this
@@ -2777,10 +2827,9 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
                 log.info("Transition: \(wf) on \(run.headBranch) → in_progress (was \(old ?? "new"))")
                 notify(title: "\u{25B6}\u{FE0F} Action Started", body: "\(wf) on \(run.headBranch)", id: "start-\(run.url)")
             }
-            if run.status == "completed" && (old == "in_progress" || old == "queued") {
-                let ok = run.conclusion == "success"
+            if isNewCompletion(old: old, new: run) {
                 log.info("Transition: \(wf) on \(run.headBranch) → \(run.conclusion ?? "unknown") (was \(old ?? "new"))")
-                notify(title: ok ? "\u{2705} Action Passed" : "\u{274C} Action Failed",
+                notify(title: completionTitle(for: run.conclusion),
                        body: "\(wf) on \(run.headBranch) \u{2014} \(runDuration(run))", id: "end-\(run.url)")
             }
         }
@@ -2863,10 +2912,16 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
     }
 
     @objc func systemAppearanceChanged() {
-        // Distributed notifications can arrive on a background thread; also CFPreferences
-        // may not have flushed yet — a tiny hop to the next main runloop is reliable.
-        DispatchQueue.main.async { [weak self] in
+        // Two observers feed this (distributed + AppKit), so debounce.
+        // cfprefsd may also not have flushed the new AppleInterfaceStyle yet
+        // when this fires — reading immediately can pin the OLD appearance
+        // until restart, which is exactly the stuck-theme bug. Wait a beat,
+        // then re-resolve on the main thread.
+        guard !appearanceReapplyPending else { return }
+        appearanceReapplyPending = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
             guard let self = self else { return }
+            self.appearanceReapplyPending = false
             self.applySystemAppearance()
             self.updateIcon()
             // Discard the stale view tree (its CGColors are baked in the OLD appearance).
