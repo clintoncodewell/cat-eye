@@ -842,6 +842,17 @@ func runSelfTest() {
     check(pruned.count == 2 && pruned[0].contains("\"workflow\":\"a\"") && pruned[1].hasPrefix("{\"torn"),
           "prune drops old records and keeps unreadable lines")
 
+    // Edit keys the popover handles itself (KeyablePanel.swift): ⌘X/C/V/A/Z, ⇧⌘Z redo; nothing else.
+    func sel(_ k: String, _ m: NSEvent.ModifierFlags) -> String? {
+        FocusKit.editSelector(key: k, modifiers: m).map { NSStringFromSelector($0) }
+    }
+    check(sel("x", .command) == "cut:" && sel("c", .command) == "copy:" && sel("v", .command) == "paste:"
+          && sel("a", .command) == "selectAll:" && sel("z", .command) == "undo:", "edit keys map to their actions")
+    check(sel("Z", [.command, .shift]) == "redo:" && sel("z", [.command, .shift]) == "redo:", "shift-cmd-Z is redo")
+    check(sel("v", [.command, .shift]) == nil && sel("c", [.command, .shift]) == nil, "shift-cmd-V is not paste")
+    check(sel("c", [.command, .option]) == nil && sel("v", []) == nil && sel("q", .command) == nil, "other combos are ignored")
+    check(sel("c", [.command, .capsLock]) == "copy:" && sel("c", [.command, .function]) == "copy:", "caps lock and fn do not block cmd-C")
+
     print("SELFTEST OK — \(ins.count) insights, report \(md.count) chars")
 }
 
@@ -2543,6 +2554,7 @@ class SettingsVC: NSViewController {
 class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNotificationCenterDelegate {
     var statusItem: NSStatusItem!
     var popover: NSPopover!
+    var popoverWasKey = false   // set in popoverWillClose, while the popover window still knows if it was key
     var timer: Timer?
     var isPulsing = false
     var iconKey: (color: NSColor, badge: String?)?   // what the button already shows
@@ -2965,7 +2977,15 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
 
     @objc func quitApp() { log.info("Cat Eye quitting"); NSApp.terminate(nil) }
 
+    func popoverWillClose(_ notification: Notification) {
+        popoverWasKey = popover.contentViewController?.view.window?.isKeyWindow ?? false
+    }
+
     func popoverDidClose(_ notification: Notification) {
+        // Only a key popover leaves us active with a dead keyboard. One that closed because the user
+        // moved to another app or panel was not key, and the FocusKit keyDown net covers any leftover.
+        if popoverWasKey { FocusKit.scheduleHandBack() }
+        popoverWasKey = false
         closeTime = Date()
         popover.contentViewController = nil  // Release settings view if open
         scheduleTimer()                      // nobody is watching: back to the slow cadence
@@ -2980,4 +3000,11 @@ let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 let delegate = GHActionsBar()
 app.delegate = delegate
+// Cat Eye has no Edit menu: route ⌘X/C/V/A/Z up the key window's responder chain, and hand activation back
+// when a key popover or window goes away (KeyablePanel.swift).
+MainActor.assumeIsolated {   // main.swift top level is nonisolated here; this runs on the main thread
+    FocusKit.log = { log.info("\($0, privacy: .public)") }
+    FocusKit.install()
+    FocusKit.installEditKeyMonitor()
+}
 app.run()

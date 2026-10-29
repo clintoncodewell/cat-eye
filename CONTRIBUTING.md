@@ -15,7 +15,7 @@ Requires macOS 13+ and Xcode Command Line Tools (`xcode-select --install`).
 
 ## Guidelines
 
-- **Keep it lean.** No external packages, no frameworks beyond AppKit/UserNotifications. The whole app lives in `main.swift` — please keep it that way unless there's a compelling reason.
+- **Keep it lean.** No external packages, no frameworks beyond AppKit/UserNotifications. The whole app lives in `main.swift`, apart from `KeyablePanel.swift` (the shared keyboard-focus helper, copied unchanged between our menu-bar apps) — please keep it that way unless there's a compelling reason.
 - **Security matters.** The app shells out to `gh` only via hardcoded trusted paths with an allowlisted environment, and validates all repo input. Don't weaken these.
 - **Accessibility matters.** Status is never conveyed by colour alone (we use the Okabe-Ito palette plus shape/text signals). New UI should follow the same rule and stay keyboard-navigable.
 - **No telemetry, no tokens.** Cat Eye never handles credentials itself — auth is delegated entirely to the `gh` CLI.
