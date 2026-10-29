@@ -1,0 +1,25 @@
+CONTRIBUTING.md
+  s_c58c2aad845f52::t_e0c00ace4df523 18
+KeyablePanel.swift
+  s_c58c2aad845f52::t_a0addd9a3265f5 1-192
+build.sh
+  s_c58c2aad845f52::t_8ab7aea38c40a8 6
+main.swift
+  s_c58c2aad845f52::t_b34c5fd00e09c8 845-855,2557,2980-2983,2985-2988,3003-3009
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0b361de4cc616eddd22a5725b18249b698563ef6",
+  "prompts": {},
+  "sessions": {
+    "s_c58c2aad845f52": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8992d941-115b-42b8-b048-88a01220ca97",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Clinton Cunningham <188536720+clintoncodewell@users.noreply.github.com>"
+    }
+  }
+}
