@@ -2951,7 +2951,7 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
             // Next show reconstructs under the new drawing context.
             let wasShownAsSettings = self.popover.contentViewController is SettingsVC
             let wasShown = self.popover.isShown
-            if wasShown { self.closeForReopen() } else { self.popover.close() }
+            self.closeForReopen()   // flags only a popover that is really open
             self.popover.contentViewController = nil
             if wasShown {
                 self.closeTime = .distantPast
@@ -2985,6 +2985,11 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
     }
 
     @objc func quitApp() { log.info("Cat Eye quitting"); NSApp.terminate(nil) }
+
+    func popoverDidShow(_ notification: Notification) {
+        // The reopen happened: an interrupted close must not leave the flag set and skip a later real hand-back.
+        reopenPending = false
+    }
 
     func popoverWillClose(_ notification: Notification) {
         popoverWasKey = popover.contentViewController?.view.window?.isKeyWindow ?? false

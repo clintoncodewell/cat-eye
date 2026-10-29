@@ -24,11 +24,10 @@ enum FocusKit {
     private static var installed = false
     private static var checkPending = false
     private static var recheck: DispatchWorkItem?
-    /// How many menus (status-item, context menu, submenus) are open. Menu windows cannot become key, so without this
-    /// a hand-back during menu tracking would look idle and close the menu the user just opened. A count, not a Bool,
-    /// so a submenu closing does not clear it while its parent is still open.
-    private static var menuDepth = 0
-    private static var menuTracking: Bool { menuDepth > 0 }
+    /// True while a menu (status-item or context menu) is open. Menu windows cannot become key, so without this
+    /// a hand-back during menu tracking would look idle and close the menu the user just opened. A Bool, not a count:
+    /// AppKit posts the tracking notifications for the root menu only, and a missed end recovers on the next close.
+    private static var menuTracking = false
     /// Windows that never hold the keyboard for the user even though they could become key, such as an
     /// always-visible indicator or a meeting overlay. They must not stop a hand-back while they are on screen.
     /// When one of them is key, `NSApp.keyWindow` is set, so the app is not idle anyway.
@@ -53,12 +52,12 @@ enum FocusKit {
             MainActor.assumeIsolated { if wasKey { scheduleHandBack() } }
         }
         NotificationCenter.default.addObserver(forName: NSMenu.didBeginTrackingNotification, object: nil, queue: .main) { _ in
-            MainActor.assumeIsolated { menuDepth += 1 }
+            MainActor.assumeIsolated { menuTracking = true }
         }
         NotificationCenter.default.addObserver(forName: NSMenu.didEndTrackingNotification, object: nil, queue: .main) { _ in
             // No hand-back here: the chosen item may be opening a window or another app (Join meeting),
             // and a hand-back would race it. If nothing took the keyboard, the keyDown net below recovers.
-            MainActor.assumeIsolated { menuDepth = max(0, menuDepth - 1) }
+            MainActor.assumeIsolated { menuTracking = false }
         }
         // Safety net for every path that did not hand back: a key that reaches us while we are active
         // with no key window would only ding, and no other app's panel can hold the keyboard.
