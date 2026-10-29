@@ -1,0 +1,23 @@
+KeyablePanel.swift
+  s_c58c2aad845f52::t_d37f47d0895c75 27-30,55,60
+build.sh
+  s_c58c2aad845f52::t_30580b4bb7cc83 6
+main.swift
+  s_c58c2aad845f52::t_5bbec3c8cab736 2954,2989-2993
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1199be4799174bab0da5adbfd690324be01342d2",
+  "prompts": {},
+  "sessions": {
+    "s_c58c2aad845f52": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8992d941-115b-42b8-b048-88a01220ca97",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Clinton Cunningham <188536720+clintoncodewell@users.noreply.github.com>"
+    }
+  }
+}
