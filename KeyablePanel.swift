@@ -24,9 +24,15 @@ enum FocusKit {
     private static var installed = false
     private static var checkPending = false
     private static var recheck: DispatchWorkItem?
-    /// True while a menu (status-item or context menu) is open. Menu windows cannot become key, so without this
-    /// a hand-back during menu tracking would look idle and close the menu the user just opened.
-    private static var menuTracking = false
+    /// How many menus (status-item, context menu, submenus) are open. Menu windows cannot become key, so without this
+    /// a hand-back during menu tracking would look idle and close the menu the user just opened. A count, not a Bool,
+    /// so a submenu closing does not clear it while its parent is still open.
+    private static var menuDepth = 0
+    private static var menuTracking: Bool { menuDepth > 0 }
+    /// Windows that never hold the keyboard for the user even though they could become key, such as an
+    /// always-visible indicator or a meeting overlay. They must not stop a hand-back while they are on screen.
+    /// When one of them is key, `NSApp.keyWindow` is set, so the app is not idle anyway.
+    static var ignoredForIdle: (NSWindow) -> Bool = { _ in false }
 
     static func install() {
         guard !installed else { return }
@@ -47,12 +53,12 @@ enum FocusKit {
             MainActor.assumeIsolated { if wasKey { scheduleHandBack() } }
         }
         NotificationCenter.default.addObserver(forName: NSMenu.didBeginTrackingNotification, object: nil, queue: .main) { _ in
-            MainActor.assumeIsolated { menuTracking = true }
+            MainActor.assumeIsolated { menuDepth += 1 }
         }
         NotificationCenter.default.addObserver(forName: NSMenu.didEndTrackingNotification, object: nil, queue: .main) { _ in
             // No hand-back here: the chosen item may be opening a window or another app (Join meeting),
             // and a hand-back would race it. If nothing took the keyboard, the keyDown net below recovers.
-            MainActor.assumeIsolated { menuTracking = false }
+            MainActor.assumeIsolated { menuDepth = max(0, menuDepth - 1) }
         }
         // Safety net for every path that did not hand back: a key that reaches us while we are active
         // with no key window would only ding, and no other app's panel can hold the keyboard.
@@ -101,7 +107,7 @@ enum FocusKit {
     /// Active, with no key window, no modal, no open menu and nothing visible here that could take the keyboard.
     private static var isIdle: Bool {
         NSApp.isActive && NSApp.keyWindow == nil && NSApp.modalWindow == nil && !menuTracking
-            && !NSApp.windows.contains(where: { $0.isVisible && $0.isOnActiveSpace && $0.canBecomeKey })
+            && !NSApp.windows.contains(where: { $0.isVisible && $0.isOnActiveSpace && $0.canBecomeKey && !ignoredForIdle($0) })
     }
 
     /// Give activation back to the app the user came from now, whatever windows we have open.
@@ -112,8 +118,12 @@ enum FocusKit {
     static func handBack() -> Bool {
         guard NSApp.isActive else { return false }
         if let back = returnTo, !back.isTerminated, !back.isHidden {
-            NSApp.yieldActivation(to: back)
-            back.activate()
+            if #available(macOS 14.0, *) {
+                NSApp.yieldActivation(to: back)
+                back.activate()
+            } else {
+                back.activate(options: [])
+            }
             log("focus: handed activation back to \(back.localizedName ?? "?")")
             return true
         }

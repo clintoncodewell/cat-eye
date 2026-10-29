@@ -2555,6 +2555,15 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
     var statusItem: NSStatusItem!
     var popover: NSPopover!
     var popoverWasKey = false   // set in popoverWillClose, while the popover window still knows if it was key
+    /// Set just before a close that is followed by a reopen (refresh, config save, appearance change), so
+    /// popoverDidClose skips the hand-back: handing activation away in between would bounce focus off us.
+    var reopenPending = false
+    /// Close the popover because it is about to be shown again. Only flags a popover that is really open,
+    /// since a close of a hidden popover sends no popoverDidClose to consume the flag.
+    func closeForReopen() {
+        if popover.isShown { reopenPending = true }
+        popover.close()
+    }
     var timer: Timer?
     var isPulsing = false
     var iconKey: (color: NSColor, badge: String?)?   // what the button already shows
@@ -2775,7 +2784,7 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
         prevStatuses = [:]
         firstLoad = true
         grouped = []
-        popover.close()
+        closeForReopen()
         refresh(force: true) { [weak self] in
             guard let self = self else { return }
             self.closeTime = .distantPast
@@ -2942,7 +2951,7 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
             // Next show reconstructs under the new drawing context.
             let wasShownAsSettings = self.popover.contentViewController is SettingsVC
             let wasShown = self.popover.isShown
-            self.popover.close()
+            if wasShown { self.closeForReopen() } else { self.popover.close() }
             self.popover.contentViewController = nil
             if wasShown {
                 self.closeTime = .distantPast
@@ -2967,7 +2976,7 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
     }
 
     @objc func doRefresh() {
-        popover.close()
+        closeForReopen()
         refresh(force: true) { [weak self] in
             guard let self = self else { return }
             self.closeTime = .distantPast
@@ -2984,8 +2993,10 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
     func popoverDidClose(_ notification: Notification) {
         // Only a key popover leaves us active with a dead keyboard. One that closed because the user
         // moved to another app or panel was not key, and the FocusKit keyDown net covers any leftover.
-        if popoverWasKey { FocusKit.scheduleHandBack() }
+        // A close that is followed by a reopen (reopenPending) must not hand back either.
+        if popoverWasKey && !reopenPending { FocusKit.scheduleHandBack() }
         popoverWasKey = false
+        reopenPending = false
         closeTime = Date()
         popover.contentViewController = nil  // Release settings view if open
         scheduleTimer()                      // nobody is watching: back to the slow cadence
