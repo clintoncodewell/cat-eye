@@ -2658,15 +2658,11 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
         applySystemAppearance()   // pins NSApp.appearance + popover.appearance from defaults
 
         // System-wide light/dark toggle. NSApp.effectiveAppearance is unreliable for
-        // .accessory apps, so we listen for the canonical distributed notification
-        // AND AppKit's own effective-appearance change (belt and suspenders: Auto
-        // schedule flips don't always post both).
+        // .accessory apps, so we listen for the canonical distributed notification;
+        // applicationDidBecomeActive re-resolves it as a safety net.
         DistributedNotificationCenter.default.addObserver(
             self, selector: #selector(systemAppearanceChanged),
             name: NSNotification.Name("AppleInterfaceThemeChangedNotification"), object: nil)
-        NotificationCenter.default.addObserver(
-            self, selector: #selector(systemAppearanceChanged),
-            name: NSApplication.didChangeEffectiveAppearanceNotification, object: nil)
 
         if REPOS.isEmpty {
             // First run: open popover with settings
@@ -2989,7 +2985,7 @@ class GHActionsBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNo
     }
 
     @objc func systemAppearanceChanged() {
-        // Two observers feed this (distributed + AppKit), so debounce.
+        // Debounce: theme flips can post this notification more than once.
         // cfprefsd may also not have flushed the new AppleInterfaceStyle yet
         // when this fires — reading immediately can pin the OLD appearance
         // until restart, which is exactly the stuck-theme bug. Wait a beat,
