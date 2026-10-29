@@ -1,0 +1,28 @@
+main.swift
+  s_4852cf04f906f3::t_9bd703958ec764 2618
+  s_4852cf04f906f3::t_9612db267ab479 856-873
+  s_4852cf04f906f3::t_5a4cba3335e078 2707-2714
+  s_4852cf04f906f3::t_c37288b2bcad9c 2907,2909
+  s_4852cf04f906f3::t_00bc7e2a69f89f 2992-2999,3001
+  s_4852cf04f906f3::t_6a60a8d01d1531 2572-2589
+  s_4852cf04f906f3::t_878cb79f2f600f 2661-2663,2667-2669
+README.md
+  s_4852cf04f906f3::t_d81d272ff0c991 225
+  s_4852cf04f906f3::t_0921c988f3b19d 28
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "4e86904e774a009309ae1a6f54084ab2c542ff8d",
+  "prompts": {},
+  "sessions": {
+    "s_4852cf04f906f3": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f512c2e84ffe8vM6TvcaDUH37z",
+        "model": "muse-spark-1.3-contributor-free"
+      },
+      "human_author": "Clinton Cunningham <188536720+clintoncodewell@users.noreply.github.com>"
+    }
+  }
+}
